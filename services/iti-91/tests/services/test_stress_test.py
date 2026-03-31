@@ -2,6 +2,7 @@ import json as json_package
 import os
 import time
 import threading
+from pathlib import Path
 import psutil
 import pytest
 
@@ -204,6 +205,7 @@ def test_stress_test_update(
     mock_get_all_directories: List[DirectoryDto],
     mock_get_one_directory: DirectoryDto,
     api_client: TestClient,
+    tmp_path: Path,
     resource_count: int,
     version_count: int,
     max_depth: int,
@@ -217,6 +219,10 @@ def test_stress_test_update(
 
     iterations = 1
     global iteration
+    global MOCK_DATA_PATH
+    global TEST_RESULTS_PATH
+    MOCK_DATA_PATH = str(tmp_path / "mock_data")
+    TEST_RESULTS_PATH = str(tmp_path / "testing_results")
 
     print(f"Running test: {test_name}")
     db = get_database()
@@ -251,13 +257,14 @@ def test_stress_test_update(
 
     latest_entries: Dict[str, Tuple[int, str]] = {}
 
-    all_histories = CACHE.get("tests/mock_data/all_resources_history.json")
+    all_histories_cache_key = os.path.join(MOCK_DATA_PATH, "all_resources_history.json")
+    all_histories = CACHE.get(all_histories_cache_key)
     if all_histories is None:
         all_histories_file_path = os.path.join(MOCK_DATA_PATH, "all_resources_history.json")
         if os.path.exists(all_histories_file_path):
             with open(all_histories_file_path, "r", encoding="utf-8") as f:
                 all_histories = json_package.load(f)
-            CACHE["tests/mock_data/all_resources_history.json"] = all_histories
+            CACHE[all_histories_cache_key] = all_histories
         else:
             pytest.skip("All resources history file not available for this stress-test configuration")
 

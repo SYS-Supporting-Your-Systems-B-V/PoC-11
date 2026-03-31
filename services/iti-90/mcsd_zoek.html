@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <title>E-mailadres zoeken (mCSD)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+        :root {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                         Roboto, sans-serif;
+            line-height: 1.4;
+            color: #1f2933;
+            background-color: #f5f7fa;
+        }
+
+        body {
+            margin: 0;
+            padding: 2rem;
+            display: flex;
+            justify-content: center;
+        }
+
+        .app {
+            width: 100%;
+            max-width: 960px;
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+            padding: 1.75rem 2rem 2rem;
+            box-sizing: border-box;
+        }
+
+        h1 {
+            font-size: 1.4rem;
+            margin: 0 0 0.75rem;
+        }
+
+        .subtitle {
+            font-size: 0.9rem;
+            color: #6b7785;
+            margin-bottom: 1.25rem;
+        }
+
+        .form-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            align-items: center;
+            margin-bottom: 0.75rem;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            flex: 1 1 260px;
+            min-width: 0;
+        }
+
+        label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .radio-group {
+            display: flex;
+            gap: 1.25rem;
+            align-items: center;
+            font-size: 0.9rem;
+        }
+
+        .radio-group input {
+            margin-right: 0.35rem;
+        }
+
+        input[type="text"] {
+            padding: 0.45rem 0.6rem;
+            border-radius: 8px;
+            border: 1px solid #cbd2e1;
+            font-size: 0.95rem;
+            outline: none;
+            box-sizing: border-box;
+        }
+
+        input[type="text"]:focus {
+            border-color: #2563eb;
+            box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.25);
+        }
+
+        .hint {
+            font-size: 0.8rem;
+            color: #6b7785;
+            margin-bottom: 0.5rem;
+        }
+
+        .actions {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            margin-bottom: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        button {
+            border: none;
+            border-radius: 999px;
+            padding: 0.45rem 1.4rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            color: #ffffff;
+            box-shadow: 0 8px 16px rgba(37, 99, 235, 0.35);
+            transition: transform 0.08s ease-out, box-shadow 0.08s ease-out, opacity 0.15s;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 22px rgba(37, 99, 235, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+            box-shadow: 0 5px 12px rgba(37, 99, 235, 0.35);
+            opacity: 0.9;
+        }
+
+        button:disabled {
+            opacity: 0.55;
+            cursor: default;
+            box-shadow: none;
+            transform: none;
+        }
+
+        .status-line {
+            font-size: 0.85rem;
+            color: #6b7785;
+        }
+
+        .status-line strong {
+            color: #111827;
+        }
+
+        .status-line .error {
+            color: #b91c1c;
+        }
+
+        .status-line .ok {
+            color: #047857;
+        }
+
+        .table-wrapper {
+            margin-top: 1rem;
+            border-radius: 10px;
+            border: 1px solid #d0d7e3;
+            overflow: hidden;
+            background: #ffffff;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 600px;
+            font-size: 0.9rem;
+        }
+
+        thead {
+            background: #f1f5f9;
+        }
+
+        th, td {
+            padding: 0.45rem 0.6rem;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+            white-space: nowrap;
+        }
+
+        th {
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #4b5563;
+        }
+
+        tbody tr:nth-child(even) {
+            background: #f9fafb;
+        }
+
+        tbody tr:hover {
+            background: #e0ecff;
+        }
+
+        tbody tr {
+            cursor: pointer;
+        }
+
+        .table-scroll {
+            max-height: 360px;
+            overflow: auto;
+        }
+
+        .small-text {
+            font-size: 0.75rem;
+            color: #9ca3af;
+        }
+
+        @media (max-width: 720px) {
+            .app {
+                padding: 1.25rem 1.25rem 1.5rem;
+            }
+
+            .table-wrapper {
+                border-radius: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <h1>E-mailadres zoeken (mCSD)</h1>
+    <div class="subtitle">
+        Zoeken in mCSD:
+        organisaties of locaties met functionele mailboxen.
+    </div>
+
+    <form id="search-form">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Zoek in</label>
+                <div class="radio-group">
+                    <label><input type="radio" name="scope" value="organization" checked> organisatie</label>
+                    <label><input type="radio" name="scope" value="location"> locatie</label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="q">Zoektekst</label>
+                <input type="text" id="q" name="q" autocomplete="off" maxlength="64"
+                       placeholder="bijv. polikliniek, ziekenhuis, locatie-naam">
+            </div>
+        </div>
+
+        <div class="hint" id="hint">
+            Bijv. polikliniek, ziekenhuis
+        </div>
+
+        <div class="actions">
+            <button type="submit" id="search-btn">Zoek</button>
+            <span class="status-line" id="status">
+                Geen zoekactie uitgevoerd.
+            </span>
+        </div>
+    </form>
+
+    <div class="table-wrapper">
+        <div class="table-scroll">
+            <table>
+                <thead>
+                <tr>
+                    <th id="th-col1">naam</th>
+                    <th id="th-col2">e-mail</th>
+                    <th id="th-col3">bron</th>
+                    <th id="th-col4"></th>
+                </tr>
+                </thead>
+                <tbody id="results-body">
+                <!-- rijen worden via JavaScript gevuld -->
+                </tbody>
+            </table>
+        </div>
+        <div class="small-text" id="footer-info" style="padding: 0.35rem 0.6rem 0.5rem;">
+            0 resultaten.
+        </div>
+    </div>
+</div>
+
+<script>
+    // === instellingen =======================================================
+    // Gebruik dezelfde host/poort als de app die deze pagina serveert.
+    const BASE_URL = window.location.origin;
+    const API_KEY = "";                          // laat leeg als geen API key vereist is
+    const MCS_LIMIT = 50;
+
+    // === hulpfuncties =======================================================
+
+    function setStatus(text, type) {
+        const el = document.getElementById("status");
+        el.textContent = text;
+        el.className = "status-line";
+        if (type === "error") {
+            el.classList.add("error");
+        } else if (type === "ok") {
+            el.classList.add("ok");
+        }
+    }
+
+    function sanitize(text) {
+        if (!text) return "";
+        return String(text).replace(/;/g, ",").trim();
+    }
+
+    function updateHint(scope) {
+        const hint = document.getElementById("hint");
+        const input = document.getElementById("q");
+        if (scope === "location") {
+            hint.textContent = "Bijv. locatie";
+            if (input) {
+                input.placeholder = "bijv. locatie";
+            }
+        } else {
+            hint.textContent = "Bijv. polikliniek, ziekenhuis";
+            if (input) {
+                input.placeholder = "bijv. polikliniek, ziekenhuis";
+            }
+        }
+    }
+
+    function updateTableHeaders(scope) {
+        const th1 = document.getElementById("th-col1");
+        const th2 = document.getElementById("th-col2");
+        const th3 = document.getElementById("th-col3");
+        const th4 = document.getElementById("th-col4");
+
+        if (scope === "location") {
+            // locatie: naam, organisatienaam, e-mail, bron
+            th1.textContent = "naam";
+            th2.textContent = "organisatienaam";
+            th3.textContent = "e-mail";
+            th4.textContent = "bron";
+        } else {
+            // organisatie: naam, e-mail, bron
+            th1.textContent = "naam";
+            th2.textContent = "e-mail";
+            th3.textContent = "bron";
+            th4.textContent = "";
+        }
+    }
+
+    // === event handlers =====================================================
+
+    document.addEventListener("DOMContentLoaded", function () {
+        const form = document.getElementById("search-form");
+        const inputQ = document.getElementById("q");
+        const btn = document.getElementById("search-btn");
+        const tbody = document.getElementById("results-body");
+        const footer = document.getElementById("footer-info");
+
+        // radio's: hint + headers bij wisselen
+        document.querySelectorAll('input[name="scope"]').forEach(function (radio) {
+            radio.addEventListener("change", function () {
+                const scope = this.value;
+                updateHint(scope);
+                updateTableHeaders(scope);
+                tbody.innerHTML = "";
+                footer.textContent = "0 resultaten.";
+            });
+        });
+
+        // initiale headers/hint
+        updateHint("organization");
+        updateTableHeaders("organization");
+
+        form.addEventListener("submit", function (evt) {
+            evt.preventDefault();
+
+            const query = (inputQ.value || "").trim();
+            const scope = document.querySelector('input[name="scope"]:checked').value;
+
+            if (!query) {
+                setStatus("Voer een zoekterm in.", "error");
+                inputQ.focus();
+                return;
+            }
+
+            if (query.length > 64) {
+                setStatus("Zoekterm is te lang (max. 64 tekens).", "error");
+                inputQ.focus();
+                return;
+            }
+
+            btn.disabled = true;
+            setStatus("Zoeken", null);
+            tbody.innerHTML = "";
+            footer.textContent = "Bezig met zoeken";
+
+            // endpoint per scope
+            const path = scope === "location" ? "/addressbook/location" : "/addressbook/organization";
+
+            // we gebruiken name:contains zoals in de Access-client
+            const params = new URLSearchParams();
+            params.set("limit", String(MCS_LIMIT));
+            params.set("name:contains", query);
+
+            const url = `${BASE_URL}${path}?${params.toString()}`;
+
+            const headers = {};
+            if (API_KEY && API_KEY.trim().length > 0) {
+                headers["X-API-Key"] = API_KEY.trim();
+            }
+
+            fetch(url, {
+                method: "GET",
+                headers: headers
+            })
+                .then(function (response) {
+                    return response.text().then(function (text) {
+                        let payload = null;
+                        if (text) {
+                            try {
+                                payload = JSON.parse(text);
+                            } catch (e) {
+                                payload = null;
+                            }
+                        }
+                        if (!response.ok) {
+                            let serverMessage = "";
+                            if (payload && typeof payload === "object") {
+                                if (typeof payload.message === "string" && payload.message.trim().length > 0) {
+                                    serverMessage = payload.message.trim();
+                                } else if (typeof payload.detail === "string" && payload.detail.trim().length > 0) {
+                                    serverMessage = payload.detail.trim();
+                                } else if (typeof payload.reason === "string" && payload.reason.trim().length > 0) {
+                                    serverMessage = payload.reason.trim();
+                                } else if (Array.isArray(payload.detail) && payload.detail.length > 0) {
+                                    if (payload.detail[0] && typeof payload.detail[0].msg === "string") {
+                                        serverMessage = payload.detail[0].msg;
+                                    } else {
+                                        try {
+                                            serverMessage = JSON.stringify(payload.detail[0]);
+                                        } catch (e) {
+                                            serverMessage = String(payload.detail[0]);
+                                        }
+                                    }
+                                } else if (payload.detail && typeof payload.detail === "object") {
+                                    try {
+                                        serverMessage = JSON.stringify(payload.detail);
+                                    } catch (e) {
+                                        serverMessage = String(payload.detail);
+                                    }
+                                }
+                                if (payload.request_id) {
+                                    serverMessage = serverMessage ? serverMessage + " (request_id: " + payload.request_id + ")" : "request_id: " + payload.request_id;
+                                }
+                            }
+                            if (!serverMessage && text) {
+                                serverMessage = text.trim();
+                            }
+                            const baseMessage = "HTTP " + response.status + " " + response.statusText;
+                            throw new Error(serverMessage ? (baseMessage + ": " + serverMessage) : baseMessage);
+                        }
+                        if (payload === null) {
+                            throw new Error("Onverwacht antwoord (geen JSON).");
+                        }
+                        return payload;
+                    });
+                })
+                .then(function (data) {
+                    const items = Array.isArray(data.items) ? data.items : [];
+                    let count = 0;
+
+                    items.forEach(function (entry) {
+                        const tr = document.createElement("tr");
+
+                        function addCell(text) {
+                            const td = document.createElement("td");
+                            td.textContent = text || "";
+                            tr.appendChild(td);
+                        }
+
+                        if (scope === "location") {
+                            const name = sanitize(entry.name || "");
+                            const orgName = sanitize(entry.organizationName || "");
+                            const email = sanitize(entry.email || "");
+                            const source = sanitize(entry.source || "");
+
+                            if (!name && !email && !orgName) {
+                                return;
+                            }
+
+                            addCell(name);
+                            addCell(orgName);
+                            addCell(email);
+                            addCell(source);
+
+                            tr.addEventListener("dblclick", function () {
+                                if (email) {
+                                    window.location.href = "mailto:" + email;
+                                }
+                            });
+                        } else {
+                            // organization
+                            const name = sanitize(entry.name || "");
+                            const email = sanitize(entry.email || "");
+                            const source = sanitize(entry.source || "");
+
+                            if (!name && !email) {
+                                return;
+                            }
+
+                            addCell(name);
+                            addCell(email);
+                            addCell(source);
+                            addCell(""); // 4e kolom leeg in organisatie-modus
+
+                            tr.addEventListener("dblclick", function () {
+                                if (email) {
+                                    window.location.href = "mailto:" + email;
+                                }
+                            });
+                        }
+
+                        tbody.appendChild(tr);
+                        count += 1;
+                    });
+
+                    footer.textContent = count + " " + (count === 1 ? "resultaat" : "resultaten") + ".";
+                    setStatus("Zoekactie voltooid.", "ok");
+                })
+                .catch(function (err) {
+                    console.error(err);
+                    setStatus("Fout bij zoeken: " + err.message, "error");
+                    footer.textContent = "0 resultaten (fout).";
+                })
+                .finally(function () {
+                    btn.disabled = false;
+                });
+        });
+    });
+</script>
+</body>
+</html>

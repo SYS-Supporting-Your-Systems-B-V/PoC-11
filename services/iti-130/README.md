@@ -8,17 +8,51 @@ De output bestaat (minimaal) uit:
 - **Location** (locatie)
 - **HealthcareService** (1:1 afgeleid van afdeling)
 - **Endpoint** (afgeleid van `tblEndpoint`)
+- Optioneel: **Provenance** (audit trail; per transaction bundle/chunk; default uit, alleen als `--include-provenance` aan staat; en alleen toegevoegd als er non-DELETE entries zijn)
 - Optioneel: **Practitioner** + **PractitionerRole** (medewerker + inzet)
 
 > De logische FHIR ids zijn stabiel en worden afgeleid van de table keys (geen extra FhirId kolommen nodig), bijv. `org-kliniek-<id>`, `loc-<id>`, `ep-<id>`, `prac-<id>`, etc.
 
 ---
 
+## Rol in deze repository
+
+In de volledige stack van deze repository draait deze publisher als de
+eenmalige Compose job `iti-130-publisher` uit
+[`../../poc9-start-stack/docker-compose.yaml`](../../poc9-start-stack/docker-compose.yaml).
+De standaard containercommand:
+
+- gebruikt `SQL_CONN=sqlite:///demo.db`
+- publiceert naar `FHIR_BASE=http://hapi-directory:8080/fhir`
+- forceert een lokale demo-reset met `--sqlite-reset-seed` en
+  `--fhir-reset-seed`
+- publiceert practitioners mee met `--include-practitioners`
+
+Daarom is `Exited (0)` na `docker compose up -d` voor deze container de
+verwachte successtatus, niet een fout.
+
+Wil je dezelfde seed-run opnieuw uitvoeren binnen de stack:
+
+```bash
+docker compose -f poc9-start-stack/docker-compose.yaml run --rm iti-130-publisher
+```
+
 ## Vereisten
 
-- Python 3
+- Python 3.11
+- **Verplichte dependencies** (altijd nodig): `pydantic`, `pydantic-settings`, `requests`, `urllib3`
 - Voor **SQLite** kan het script draaien zonder SQLAlchemy (valt terug op de ingebouwde `sqlite3` module).
 - Voor **MS SQL Server** gebruikt het script bij voorkeur **SQLAlchemy** met een MSSQL driver (bijv. `mssql+pytds://...` of via `pyodbc`).
+Als SQL_CONN mssql+pytds gebruikt dan is dit in requirements.txt nodig: python-tds
+Als SQL_CONN ODBC connection string of mssql+pyodbc gebruikt dan is dit in requirements.txt nodig: pyodbc
+
+Lokale installatie:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
 
 ---
 
@@ -60,7 +94,7 @@ export SQLITE_RESET_SEED=1
 
 > **Let op:** dit is **destructief** voor het opgegeven SQLite bestand: het verwijdert alle rijen uit de demo-tabellen (`tblKliniek`, `tblLocatie`, `tblAfdeling`, `tblEndpoint`, en bij practitioners ook `tblMedewerker*`/`tblRoldefinitie`).
 
-De seed is bedoeld voor **lokaal testen** en bestaat uit één demo kliniek met één locatie, twaalf afdelingen en één endpoint. Daarnaast wordt één medewerker + inzet + roldefinitie gevuld (alleen relevant als je `--include-practitioners` gebruikt).
+De seed is bedoeld voor **lokaal testen** en bestaat uit één demo kliniek met één locatie, twaalf afdelingen en twee endpoints (FHIR API + Nuts OAuth2). Daarnaast wordt één medewerker + inzet + roldefinitie gevuld (alleen relevant als je `--include-practitioners` gebruikt).
 
 **Kliniek (tblKliniek → Organization)**
 
@@ -113,21 +147,36 @@ De seed is bedoeld voor **lokaal testen** en bestaat uit één demo kliniek met 
 → FHIR ids (per afdelingkey): `Organization/org-afdeling-{key}` en `HealthcareService/svc-afdeling-{key}`
 **Endpoint (tblEndpoint → Endpoint)**
 
+**FHIR API endpoint (kliniekniveau)**
+
 | Veld | Waarde |
 |---|---|
 | endpointkey | `900` |
 | Kliniek | `1` |
 | Status | `active` |
-| Address | `https://fhir.demo.invalid` |
+| Address | `https://mach2.disyepd.com/notifiedpull/fhir` |
 | ConnectionType | HL7 FHIR REST |
-| payloadTypeSystemUri | `http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities` |
-| payloadTypeCode | `http://nictiz.nl/fhir/CapabilityStatement/bgz2017-servercapabilities` |
-| payloadTypeDisplay | `BGZ Server` |
+| payloadType* | *(leeg; publisher past defaults toe)* |
 | payloadMimeType | `application/fhir+json` |
 
 → FHIR id: `Endpoint/ep-900`
 
-> Let op: in de seed zijn `payloadType*` velden gevuld voor **BGZ Server**. Als je in je eigen brondata `payloadType*` leeg laat, gebruikt het script de default payloadType(s) voor BGZ (tenzij je dit overschrijft met `--default-endpoint-payload`).
+**OAuth endpoint (nuts-node)**
+
+| Veld | Waarde |
+|---|---|
+| endpointkey | `901` |
+| Kliniek | `1` |
+| Status | `active` |
+| Address | `https://mach2.disyepd.com/nuts-oauth2` |
+| ConnectionType | Direct Project |
+| payloadTypeSystemUri | `http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities` |
+| payloadTypeCode | `Nuts-OAuth` |
+| payloadTypeDisplay | `Nuts OAuth endpoint` |
+
+→ FHIR id: `Endpoint/ep-901`
+
+> Let op: in de seed zijn bij endpoint `900` de `payloadType*` velden bewust leeg gelaten zodat de publisher zijn default payload types toepast (standaard o.a. **BGZ Server** en **mCSD ITI-91**). Gebruik `--default-endpoint-payload` om dit te overschrijven.
 
 **Practitioner seed (alleen bij `--include-practitioners`)**
 
@@ -140,6 +189,7 @@ De seed is bedoeld voor **lokaal testen** en bestaat uit één demo kliniek met 
 ```
 Organization/org-kliniek-1
  ├─ Endpoint/ep-900
+ ├─ Endpoint/ep-901
  ├─ Location/loc-10
  │   └─ Organization/org-afdeling-100
  │       └─ HealthcareService/svc-afdeling-100
@@ -182,7 +232,8 @@ Hieronder een praktische checklist van de belangrijkste instellingen voor het pu
 
 ### B) Waar komt de brondata vandaan? `--sql-conn`
 
-- Stel `--sql-conn` (of env `SQL_CONN`) in op de database waarin de bron-tabellen/views staan (`tblKliniek`, `tblLocatie`, `tblAfdeling`, `tblEndpoint`, ...).
+- Stel `--sql-conn` (of env `SQL_CONN`) in op de database waarin de bron-tabellen/views staan (`tblKliniek`, `tblLocatie`, `tblAfdeling`, `tblEndpoint`, `tblKliniekLocatie`, ...).
+- `tblKliniekLocatie` is de koppeltabel tussen klinieken en locaties en is vereist om de juiste relaties te leggen.
 - Voor DiSy kun je desgewenst views maken met deze namen/kolommen zodat het script zonder codewijziging kan draaien.
 
 ### C) Authenticatie / TLS naar de FHIR server
@@ -208,7 +259,7 @@ Kies één van de volgende opties (afhankelijk van de directory):
   - `adres` (wordt `Endpoint.address`) is verplicht en moet een URL zijn.
   - `status`/`actief`/`ingangsdatum`/`einddatum` bepalen of het endpoint effectief “active” is.
   - `payloadType*` bepaalt waarvoor het endpoint bedoeld is (bijv. BgZ).
-- Als `payloadType*` leeg is, gebruikt het script default(s) voor BGZ (tenzij je dit overschrijft met `--default-endpoint-payload`).
+- Als `payloadType*` leeg is, gebruikt het script standaard **twee** default payload types: BGZ Server capabilities én mCSD ITI-91 capabilities (`nl-gf-admin-directory-update-client`). Dit is te overschrijven met `--default-endpoint-payload`.
 
 #### Voorbeeld: BGZ Server capabilities invullen in `tblEndpoint` (MS SQL)
 
@@ -342,7 +393,8 @@ Het script leest ook defaults uit environment variabelen en/of een `.env` bestan
 
 - `--fhir-reset-seed`  
   Wis alle resources op de FHIR server voordat er gepubliceerd wordt.  
-  (Destructief; bedoeld voor lokaal testen / CI. Alternatief: env `FHIR_RESET_SEED=1`.)
+  (Destructief; bedoeld voor lokaal testen / CI. Alternatief: env `FHIR_RESET_SEED=1`.)  
+  **Let op:** wordt geweigerd als `--production` aan staat.
 
 - `--fhir-base`  
   Base URL van de FHIR server waar je transaction Bundles naar POST.
@@ -378,7 +430,15 @@ Het script leest ook defaults uit environment variabelen en/of een `.env` bestan
 ### Publicatiegedrag
 
 - `--bundle-size`  
-  Max aantal entries per transaction bundle. Grotere aantallen worden in meerdere transacties opgesplitst.
+  Max aantal entries per transaction bundle. Grotere aantallen worden in meerdere transacties opgesplitst.  
+  (Default: `50`)
+  Let op: als er Provenance wordt toegevoegd, telt die mee als 1 extra entry binnen de bundle-size.
+
+- `--include-provenance`
+  Voeg per transaction bundle een **Provenance** resource toe (audit trail). (Default: uit)
+
+- `--no-provenance`
+  Voeg geen Provenance resources toe. (Default)
 
 - `--since`  
   Publiceer alleen wijzigingen sinds deze UTC timestamp (ISO).
@@ -393,6 +453,16 @@ Het script leest ook defaults uit environment variabelen en/of een `.env` bestan
 
 - `--include-meta-profile`  
   Voeg `meta.profile` toe aan resources.
+
+- `--include-meta-lastupdated` / `--no-meta-lastupdated`  
+  Publiceer `resource.meta.lastUpdated` (afgeleid uit brondata timestamps). Standaard staat dit uit.
+
+- `--include-meta-source` / `--no-meta-source`  
+  Publiceer `resource.meta.source`. Standaard staat dit uit.
+
+- `--publisher-source`  
+  Stabiele absolute URI/URN voor `meta.source` (alleen gebruikt als `--include-meta-source` aan staat).  
+  Zonder `--publisher-source` gebruikt het script `assigned-id-system-base + '/iti130-publisher'` (fallback: `urn:uuid:<run-id>`).
 
 - `--profile-set {nl|ihe|none}`  
   Welke profile set je declareert als `--include-meta-profile` aan staat.
@@ -412,7 +482,8 @@ Het script leest ook defaults uit environment variabelen en/of een `.env` bestan
   Formaat: `system|code|display`
 
 - `--bgz-policy {off|any|per-clinic|per-afdeling|per-afdeling-or-clinic}`  
-  Extra sanity policy voor BGZ endpoints.
+  Extra sanity policy voor BGZ endpoints.  
+  (Default: `per-clinic`)
 
 ### Practitioners
 
@@ -436,27 +507,36 @@ Het script leest ook defaults uit environment variabelen en/of een `.env` bestan
 ### HTTP tuning
 
 - `--timeout`  
-  HTTP read timeout in seconden.
+  HTTP read timeout in seconden. (Default: `30`)
 
 - `--connect-timeout`  
-  HTTP connect timeout in seconden.
+  HTTP connect timeout in seconden. (Default: `10.0`)
 
 - `--http-retries`  
-  Aantal retries bij tijdelijke fouten (0 = uit).
+  Aantal retries bij tijdelijke fouten (0 = uit). (Default: `0`; in `--production` default `3` tenzij je `--http-retries` of `HTTP_RETRIES` expliciet zet)
 
 - `--http-backoff`  
-  Backoff factor voor retries.
+  Backoff factor voor retries. (Default: `0.5`)
 
 - `--http-pool-connections`  
-  Connection pool: aantal pools.
+  Connection pool: aantal pools. (Default: `10`)
 
 - `--http-pool-maxsize`  
-  Connection pool: max connections per pool.
+  Connection pool: max connections per pool. (Default: `10`)
+
+- `--publish-delay`  
+  Minimum delay in seconden tussen transaction bundles. (Default: `0.0`)
+
+- `--max-retry-after`  
+  Maximaal aantal seconden om een HTTP `Retry-After` te respecteren tussen bundles (0 = negeer). (Default: `300`)
 
 ### Observability / safety
 
 - `--log-level`  
   Log level (DEBUG/INFO/WARNING/ERROR).
+
+- `--log-format {json|text}`  
+  Log output formaat. (Default: `json`)
 
 - `--production`  
   Behandel “risicovolle” instellingen als errors (bijv. http:// fhir-base, `--no-verify-tls`, SQL encrypt hints).
@@ -492,6 +572,7 @@ De volgende environment variabelen kunnen als defaults gebruikt worden (ook via 
 
 - `BUNDLE_SIZE` → `--bundle-size`
 - `SINCE_UTC` → `--since`
+- `INCLUDE_PROVENANCE` → `--include-provenance` (1/true = voeg Provenance toe; default: false)
 
 ### Profiel / NL GF
 
@@ -500,6 +581,9 @@ De volgende environment variabelen kunnen als defaults gebruikt worden (ook via 
 - `DEFAULT_URA` → `--default-ura`
 - `PUBLISHER_URA` → `--publisher-ura` (hard override; PoC/test)
 - `BGZ_POLICY` → `--bgz-policy`
+- `INCLUDE_META_LASTUPDATED` → `--include-meta-lastupdated`
+- `INCLUDE_META_SOURCE` → `--include-meta-source`
+- `PUBLISHER_SOURCE` → `--publisher-source` (alleen gebruikt als meta.source aan staat)
 
 ### mTLS
 
@@ -514,16 +598,13 @@ De volgende environment variabelen kunnen als defaults gebruikt worden (ook via 
 - `HTTP_BACKOFF` → `--http-backoff`
 - `HTTP_POOL_CONNECTIONS` → `--http-pool-connections`
 - `HTTP_POOL_MAXSIZE` → `--http-pool-maxsize`
+- `PUBLISH_DELAY_SECONDS` → `--publish-delay`
+- `MAX_RETRY_AFTER_SECONDS` → `--max-retry-after`
 
 ### Logging
 
 - `ITI130_LOG_LEVEL` → `--log-level`
-
----
-
-## Known issues / patch notes
-
-### Geen  
+- `ITI130_LOG_FORMAT` → `--log-format`
 
 ---
 

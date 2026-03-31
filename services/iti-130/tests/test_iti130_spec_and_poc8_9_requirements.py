@@ -5,6 +5,50 @@ from typing import Any, Dict, List, Set
 import pytest
 
 
+def _build_last_updated_maps(publisher_module, endpoint_rows, kliniek_locatie_rows):
+    endpoint_last_updated_by_kliniek: Dict[int, Any] = {}
+    endpoint_last_updated_by_locatie: Dict[int, Any] = {}
+    endpoint_last_updated_by_afdeling: Dict[int, Any] = {}
+    for endpoint_row in endpoint_rows:
+        publisher_module._set_max_datetime(
+            endpoint_last_updated_by_kliniek,
+            endpoint_row.get("KliniekId"),
+            endpoint_row.get("LaatstGewijzigdOp"),
+        )
+        publisher_module._set_max_datetime(
+            endpoint_last_updated_by_locatie,
+            endpoint_row.get("LocatieId"),
+            endpoint_row.get("LaatstGewijzigdOp"),
+        )
+        publisher_module._set_max_datetime(
+            endpoint_last_updated_by_afdeling,
+            endpoint_row.get("AfdelingId"),
+            endpoint_row.get("LaatstGewijzigdOp"),
+        )
+
+    kliniek_locatie_last_updated_by_locatie: Dict[int, Any] = {}
+    kliniek_locatie_last_updated_by_kliniek: Dict[int, Any] = {}
+    for kliniek_locatie_row in kliniek_locatie_rows:
+        publisher_module._set_max_datetime(
+            kliniek_locatie_last_updated_by_locatie,
+            kliniek_locatie_row.get("LocatieId"),
+            kliniek_locatie_row.get("LaatstGewijzigdOp"),
+        )
+        publisher_module._set_max_datetime(
+            kliniek_locatie_last_updated_by_kliniek,
+            kliniek_locatie_row.get("KliniekId"),
+            kliniek_locatie_row.get("LaatstGewijzigdOp"),
+        )
+
+    return (
+        endpoint_last_updated_by_kliniek,
+        endpoint_last_updated_by_locatie,
+        endpoint_last_updated_by_afdeling,
+        kliniek_locatie_last_updated_by_locatie,
+        kliniek_locatie_last_updated_by_kliniek,
+    )
+
+
 def _build_all_resources(publisher_module, cfg) -> List[Dict[str, Any]]:
     """Helper: build resources similarly to run(), but returns the resources list."""
     with publisher_module._connect(cfg.sql_conn) as conn:
@@ -29,6 +73,14 @@ def _build_all_resources(publisher_module, cfg) -> List[Dict[str, Any]]:
             lid = int(kl["LocatieId"])
             locaties_by_kliniek.setdefault(kid, []).append(lid)
 
+        (
+            endpoint_last_updated_by_kliniek,
+            endpoint_last_updated_by_locatie,
+            endpoint_last_updated_by_afdeling,
+            kliniek_locatie_last_updated_by_locatie,
+            kliniek_locatie_last_updated_by_kliniek,
+        ) = _build_last_updated_maps(publisher_module, endpoint_rows, kliniek_locatie_rows)
+
         # Endpoints first: needed for linking to Organizations/Locations/Services
         ep_resources, ep_by_kliniek, ep_by_locatie, ep_by_afdeling = publisher_module._build_endpoints(cfg, endpoint_rows)
 
@@ -39,13 +91,32 @@ def _build_all_resources(publisher_module, cfg) -> List[Dict[str, Any]]:
             afdeling_rows,
             ep_by_kliniek,
             ep_by_afdeling,
+            endpoint_last_updated_by_kliniek,
+            endpoint_last_updated_by_afdeling,
         )
 
         # Locations
-        loc_resources = publisher_module._build_locations(cfg, locatie_rows, ep_by_locatie, ura_by_kliniek, name_by_kliniek)
+        loc_resources = publisher_module._build_locations(
+            cfg,
+            locatie_rows,
+            ep_by_locatie,
+            ura_by_kliniek,
+            name_by_kliniek,
+            kliniek_locatie_last_updated_by_locatie,
+            endpoint_last_updated_by_locatie,
+        )
 
         # Services
-        svc_resources = publisher_module._build_healthcare_services(cfg, afdeling_rows, locaties_by_kliniek, ep_by_afdeling, ura_by_kliniek, name_by_kliniek)
+        svc_resources = publisher_module._build_healthcare_services(
+            cfg,
+            afdeling_rows,
+            locaties_by_kliniek,
+            ep_by_afdeling,
+            ura_by_kliniek,
+            name_by_kliniek,
+            kliniek_locatie_last_updated_by_kliniek,
+            endpoint_last_updated_by_afdeling,
+        )
 
         prac_resources: List[Dict[str, Any]] = []
         pracrole_resources: List[Dict[str, Any]] = []
@@ -77,6 +148,9 @@ def _build_all_resources(publisher_module, cfg) -> List[Dict[str, Any]]:
                 ep_by_afdeling,
                 ura_by_kliniek,
                 name_by_kliniek,
+                endpoint_last_updated_by_kliniek,
+                endpoint_last_updated_by_locatie,
+                endpoint_last_updated_by_afdeling,
             )
 
         return [*ep_resources, *org_resources, *loc_resources, *svc_resources, *prac_resources, *pracrole_resources]

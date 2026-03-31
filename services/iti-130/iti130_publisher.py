@@ -30,6 +30,7 @@ import sqlite3
 import types
 from contextlib import contextmanager
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlparse, unquote, quote_plus
 
@@ -93,9 +94,32 @@ except ModuleNotFoundError:  # pragma: no cover
 
 RUN_ID = str(uuid.uuid4())
 _LOG_CONFIGURED = False
+# Constants
+URA_LENGTH = 8
+RESPONSE_EXCERPT_LIMIT = 2000
+MAX_DEBUG_ITEMS = 10
+MAX_ERROR_ITEMS = 25
+BUNDLE_SIZE_MIN_WARN = 10
+BUNDLE_SIZE_MAX_WARN = 500
 
 
-def _configure_logging(log_level: str) -> None:
+class _JsonLogFormatter(logging.Formatter):
+    """Simple structured JSON logger for integration with log platforms."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: Dict[str, Any] = {
+            "timestamp": dt.datetime.fromtimestamp(record.created, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "level": record.levelname,
+            "logger": record.name,
+            "run_id": getattr(record, "run_id", RUN_ID),
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _configure_logging(log_level: str, log_format: str = "json") -> None:
     """Configure Python logging.
 
     Logs go to stderr so stdout can be used for JSON output in --dry-run mode.
@@ -118,12 +142,16 @@ def _configure_logging(log_level: str) -> None:
         logging.setLogRecordFactory(record_factory)
         _LOG_CONFIGURED = True
 
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s run_id=%(run_id)s %(message)s",
-        stream=sys.stderr,
-        force=True,
-    )
+    handler = logging.StreamHandler(sys.stderr)
+    if str(log_format or "json").strip().lower() == "text":
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s run_id=%(run_id)s %(message)s"))
+    else:
+        handler.setFormatter(_JsonLogFormatter())
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+    root.addHandler(handler)
 
 
 logger = logging.getLogger("iti130.publisher.zbc")
@@ -147,7 +175,7 @@ NL_GF_PROFILE = {
     "Endpoint": "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/nl-gf-endpoint",
     "Practitioner": "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/nl-gf-practitioner",
     "PractitionerRole": "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/nl-gf-practitionerrole",
-    "OrganizationAffiliation": {"http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/nl-gf-organizationaffiliation"},
+    "OrganizationAffiliation": "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/nl-gf-organizationaffiliation",
 }
 
 ORG_TYPE_SYSTEM = "http://terminology.hl7.org/CodeSystem/organization-type"
@@ -163,6 +191,9 @@ AGB_PRACT_SYSTEM = "http://fhir.nl/fhir/NamingSystem/agb-z"  # AGB-code zorgverl
 
 PROVENANCE_PARTICIPANT_TYPE_SYSTEM = "http://terminology.hl7.org/CodeSystem/provenance-participant-type"
 PROVENANCE_PARTICIPANT_TYPE_AUTHOR = "author"
+PROVENANCE_ACTIVITY_SYSTEM = "http://terminology.hl7.org/CodeSystem/v3-DataOperation"
+PROVENANCE_ACTIVITY_CODE = "UPDATE"
+PROVENANCE_ACTIVITY_DISPLAY = "update"
 
 # Default NL GF Data Exchange Capabilities code system (for Endpoint.payloadType)
 NL_GF_DATA_EXCHANGE_CAPABILITIES_SYSTEM = "http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities"
@@ -203,9 +234,11 @@ FHIR_RESET_DEFAULT_RESOURCE_TYPES: Tuple[str, ...] = (
     "Endpoint",
     "Practitioner",
     "PractitionerRole",
+    "Provenance",
 )
 
 FHIR_RESET_DELETE_ORDER: Tuple[str, ...] = (
+    "Provenance",
     "PractitionerRole",
     "HealthcareService",
     "Location",
@@ -241,6 +274,10 @@ class Settings(BaseSettings):
     default_ura: Optional[str] = Field(default=None, validation_alias="DEFAULT_URA")
     # Hard override for the URA used to identify the publishing organization (useful for PoC vs production).
     publisher_ura: Optional[str] = Field(default=None, validation_alias="PUBLISHER_URA")
+    include_meta_lastupdated: bool = Field(default=False, validation_alias="INCLUDE_META_LASTUPDATED")
+    include_meta_source: bool = Field(default=False, validation_alias="INCLUDE_META_SOURCE")
+    include_provenance: bool = Field(default=False, validation_alias="INCLUDE_PROVENANCE")
+    publisher_source: Optional[str] = Field(default=None, validation_alias="PUBLISHER_SOURCE")
     bgz_policy: str = Field(default="per-clinic", validation_alias="BGZ_POLICY")
 
     mtls_cert: Optional[str] = Field(default=None, validation_alias="MTLS_CERT")
@@ -252,8 +289,11 @@ class Settings(BaseSettings):
     http_backoff_factor: float = Field(default=0.5, validation_alias="HTTP_BACKOFF")
     http_pool_connections: int = Field(default=10, validation_alias="HTTP_POOL_CONNECTIONS")
     http_pool_maxsize: int = Field(default=10, validation_alias="HTTP_POOL_MAXSIZE")
+    publish_delay_seconds: float = Field(default=0.0, validation_alias="PUBLISH_DELAY_SECONDS")
+    max_retry_after_seconds: int = Field(default=300, validation_alias="MAX_RETRY_AFTER_SECONDS")
 
     log_level: str = Field(default="INFO", validation_alias="ITI130_LOG_LEVEL")
+    log_format: str = Field(default="json", validation_alias="ITI130_LOG_FORMAT")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
 
@@ -289,6 +329,14 @@ class Config:
 
     # Hard override URA for the publishing organization (useful for PoC vs production; overrides brondata URANummer).
     publisher_ura: Optional[str] = None
+    # Control whether resource.meta.lastUpdated is published.
+    include_meta_lastupdated: bool = False
+    # Control whether resource.meta.source is published.
+    include_meta_source: bool = False
+    # Control whether a Provenance resource is included per transaction bundle.
+    include_provenance: bool = False
+    # Stable URI that identifies this publisher as the source system for resource.meta.source.
+    publisher_source: Optional[str] = None
 
     # Default Endpoint.payloadType codings (used when a row has no payloadType values)
     # Tuple items are (system, code, display)
@@ -324,12 +372,15 @@ class Config:
     http_pool_maxsize: int = 10
     http_retries: int = 0
     http_backoff_factor: float = 0.5
+    publish_delay_seconds: float = 0.0
+    max_retry_after_seconds: int = 300
 
     # User-Agent for HTTP requests.
     user_agent: str = "ITI130-Publisher-ZBC/9"
 
     # Logging / safety mode.
     log_level: str = "INFO"
+    log_format: str = "json"
     is_production: bool = False
 
 
@@ -379,6 +430,22 @@ def _validate_and_log_config(cfg: "Config") -> None:
         str(cfg.bgz_policy),
         bool(getattr(cfg, 'sqlite_reset_seed', False)),
         bool(getattr(cfg, 'fhir_reset_seed', False)),
+    )
+    # Log redacted credentials in debug mode for troubleshooting
+    if cfg.bearer_token:
+        logger.debug("Bearer token: %s", _redact_secret(cfg.bearer_token))
+    if cfg.oauth_client_secret:
+        logger.debug("OAuth client secret: %s", _redact_secret(cfg.oauth_client_secret))
+
+    logger.info(
+        "Publisher metadata: include_meta_lastupdated=%s include_meta_source=%s publisher_source=%s publish_delay_seconds=%s max_retry_after_seconds=%s log_format=%s http_retries=%s",
+        bool(getattr(cfg, "include_meta_lastupdated", False)),
+        bool(getattr(cfg, "include_meta_source", False)),
+        (_publisher_source(cfg) if bool(getattr(cfg, "include_meta_source", False)) else "disabled"),
+        float(getattr(cfg, "publish_delay_seconds", 0.0) or 0.0),
+        int(getattr(cfg, "max_retry_after_seconds", 0) or 0),
+        str(getattr(cfg, "log_format", "json") or "json"),
+        int(getattr(cfg, "http_retries", 0) or 0),
     )
 
     # Database URL checks (fail-fast)
@@ -472,10 +539,26 @@ def _validate_and_log_config(cfg: "Config") -> None:
         if not ps.scheme:
             logger.warning("assigned_id_system_base lijkt geen absolute URI: %s", cfg.assigned_id_system_base)
 
+    if bool(getattr(cfg, "include_meta_source", False)):
+        publisher_source = _publisher_source(cfg)
+        psrc = urlparse(str(publisher_source or ""))
+        if not publisher_source.startswith("urn:") and not psrc.scheme:
+            raise RuntimeError(f"publisher_source must be an absolute URI or URN (got {publisher_source!r})")
+    elif str(getattr(cfg, "publisher_source", None) or "").strip():
+        logger.info("publisher_source is gezet maar meta.source staat uit; de waarde wordt niet gepubliceerd.")
+
+    publish_delay_seconds = float(getattr(cfg, "publish_delay_seconds", 0.0) or 0.0)
+    if publish_delay_seconds < 0:
+        raise RuntimeError("publish_delay_seconds mag niet negatief zijn.")
+
+    max_retry_after_seconds = int(getattr(cfg, "max_retry_after_seconds", 0) or 0)
+    if max_retry_after_seconds < 0:
+        raise RuntimeError("max_retry_after_seconds mag niet negatief zijn.")
+
     # Bundle sizing hints
-    if cfg.bundle_size and int(cfg.bundle_size) < 10:
+    if cfg.bundle_size and int(cfg.bundle_size) < BUNDLE_SIZE_MIN_WARN:
         logger.info("bundle-size=%s is klein; publiceren kan trager zijn door meer transacties.", cfg.bundle_size)
-    if cfg.bundle_size and int(cfg.bundle_size) > 500:
+    if cfg.bundle_size and int(cfg.bundle_size) > BUNDLE_SIZE_MAX_WARN:
         logger.warning(
             "bundle-size=%s is groot; sommige FHIR servers kunnen grote transacties weigeren (413/422).",
             cfg.bundle_size,
@@ -526,7 +609,7 @@ def _classify_requests_exception(e: BaseException) -> Dict[str, str]:
     return info
 
 
-def _response_excerpt(resp: requests.Response, limit: int = 2000) -> str:
+def _response_excerpt(resp: requests.Response, limit: int = RESPONSE_EXCERPT_LIMIT) -> str:
     try:
         txt = resp.text or ""
     except Exception:
@@ -881,6 +964,123 @@ def _coerce_datetime(value: Any) -> Optional[dt.datetime]:
         except Exception:
             return None
     return None
+
+
+def _set_max_datetime(target: Dict[int, dt.datetime], key: Any, value: Any) -> None:
+    if key is None:
+        return
+    ts = _coerce_datetime(value)
+    if ts is None:
+        return
+    try:
+        key_int = int(key)
+    except (TypeError, ValueError):
+        return
+    current = target.get(key_int)
+    if current is None or ts > current:
+        target[key_int] = ts
+
+
+def _max_last_updated(*values: Any) -> Optional[dt.datetime]:
+    best: Optional[dt.datetime] = None
+
+    def _visit(value: Any) -> None:
+        nonlocal best
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                _visit(item)
+            return
+        ts = _coerce_datetime(value)
+        if ts is None:
+            return
+        if best is None or ts > best:
+            best = ts
+
+    for value in values:
+        _visit(value)
+    return best
+
+
+def _publisher_source(cfg: "Config") -> str:
+    source = str(getattr(cfg, "publisher_source", None) or "").strip()
+    if source:
+        return source
+    base = str(getattr(cfg, "assigned_id_system_base", "") or "").strip().rstrip("/")
+    if base:
+        return f"{base}/iti130-publisher"
+    return f"urn:uuid:{RUN_ID}"
+
+
+def _fhir_instant(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
+        value = dt.datetime.combine(value, dt.time.min)
+    parsed = _coerce_datetime(value)
+    if parsed is None:
+        s = str(value).strip()
+        return s if s else None
+    aware = parsed.replace(tzinfo=dt.timezone.utc)
+    return aware.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _meta_dict(cfg: "Config", last_updated: Any = None, profiles: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    meta: Dict[str, Any] = {}
+    if profiles:
+        meta["profile"] = profiles
+    if bool(getattr(cfg, "include_meta_lastupdated", False)):
+        last_updated_instant = _fhir_instant(last_updated)
+        if last_updated_instant:
+            meta["lastUpdated"] = last_updated_instant
+    if bool(getattr(cfg, "include_meta_source", False)):
+        source = _publisher_source(cfg)
+        if source:
+            meta["source"] = source
+    return meta or None
+
+
+def _parse_retry_after_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return max(0.0, float(int(s)))
+    except Exception:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(s)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=dt.timezone.utc)
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        return max(0.0, (retry_at.astimezone(dt.timezone.utc) - now_utc).total_seconds())
+    except Exception:
+        return None
+
+
+def _maybe_pause_after_chunk(cfg: "Config", retry_after: Optional[Any], chunk_index: int, total_chunks: int) -> None:
+    if chunk_index >= total_chunks:
+        return
+
+    delay_candidates: List[Tuple[float, str]] = []
+    publish_delay_seconds = float(getattr(cfg, "publish_delay_seconds", 0.0) or 0.0)
+    if publish_delay_seconds > 0:
+        delay_candidates.append((publish_delay_seconds, "configured publish delay"))
+
+    retry_after_seconds = _parse_retry_after_seconds(retry_after)
+    if retry_after_seconds is not None:
+        capped_retry_after = min(retry_after_seconds, float(getattr(cfg, "max_retry_after_seconds", 0) or 0))
+        if capped_retry_after > 0:
+            delay_candidates.append((capped_retry_after, f"Retry-After={retry_after}"))
+
+    if not delay_candidates:
+        return
+
+    wait_seconds = max(delay for delay, _reason in delay_candidates)
+    reasons = ", ".join(reason for delay, reason in delay_candidates if delay > 0)
+    logger.info("Backpressure: sleeping %.3fs before next chunk (%s).", wait_seconds, reasons)
+    time.sleep(wait_seconds)
 
 
 def _init_sqlite_schema(conn: Connection, seed: bool = True, reset_seed: bool = False) -> None:
@@ -1402,30 +1602,24 @@ _SQLITE_QUERIES: Dict[str, str] = {
 
 
 def _prune(obj: Any) -> Any:
+    """Recursively strip None values and empty lists/dicts from a FHIR resource dict."""
     if isinstance(obj, dict):
-        new = {}
+        result = {}
         for k, v in obj.items():
             pv = _prune(v)
-            if pv is None:
+            # Drop None and empty containers; keep False, 0, and non-empty strings.
+            if pv is None or pv == [] or pv == {}:
                 continue
-            if pv == []:
-                continue
-            if pv == {}:
-                continue
-            new[k] = pv
-        return new
+            result[k] = pv
+        return result
     if isinstance(obj, list):
-        new_list = []
+        result_list = []
         for v in obj:
             pv = _prune(v)
-            if pv is None:
+            if pv is None or pv == [] or pv == {}:
                 continue
-            if pv == []:
-                continue
-            if pv == {}:
-                continue
-            new_list.append(pv)
-        return new_list
+            result_list.append(pv)
+        return result_list
     return obj
 
 
@@ -1478,6 +1672,7 @@ def _profiles_for(resource_type: str, cfg: Config) -> Optional[List[str]]:
 
 
 def _assigned_id_system(cfg: Config, bucket: str) -> str:
+    """Generate AssignedId system URI by appending bucket to base."""
     base = (cfg.assigned_id_system_base or "").rstrip("/")
     if not base:
         # Fallback to a non-resolvable but valid URI.
@@ -1507,8 +1702,8 @@ def _normalize_ura(value: Any) -> str:
         s = s.split(":", 1)[1].strip()
     # Remove any whitespace characters inside the string
     s = "".join(ch for ch in s if not ch.isspace())
-    if s.isdigit() and len(s) < 8:
-        s = s.zfill(8)
+    if s.isdigit() and len(s) < URA_LENGTH:
+        s = s.zfill(URA_LENGTH)
     return s
 
 
@@ -1582,40 +1777,48 @@ def _require(cfg: Config, condition: bool, message: str) -> None:
 
 
 def _ref(resource_type: str, fhir_id: str) -> Dict[str, Any]:
+    """Create a FHIR reference."""
     return {"reference": f"{resource_type}/{fhir_id}"}
 
 
 def _id(prefix: str, key: Any) -> str:
+    """Generate a stable FHIR logical ID from a prefix and database key."""
     return f"{prefix}-{key}"
 
 
 def _org_kliniek_id(kliniek_id: int) -> str:
-    return f"org-kliniek-{kliniek_id}"
+    """Generate Organization ID for kliniek."""
+    return _id("org-kliniek", kliniek_id)
 
 
 def _org_afdeling_id(afdeling_id: int) -> str:
-    return f"org-afdeling-{afdeling_id}"
+    """Generate Organization ID for afdeling."""
+    return _id("org-afdeling", afdeling_id)
 
 
 def _loc_id(locatie_id: int) -> str:
-    return f"loc-{locatie_id}"
+    """Generate Location ID."""
+    return _id("loc", locatie_id)
 
 
 def _svc_id(afdeling_id: int) -> str:
-    return f"svc-afdeling-{afdeling_id}"
+    """Generate HealthcareService ID from afdeling."""
+    return _id("svc-afdeling", afdeling_id)
 
 
 def _prac_id(medewerker_id: int) -> str:
-    return f"prac-{medewerker_id}"
+    """Generate Practitioner ID."""
+    return _id("prac", medewerker_id)
 
 
 def _pracrole_id(inzet_id: int) -> str:
-    return f"pracrole-{inzet_id}"
+    """Generate PractitionerRole ID."""
+    return _id("pracrole", inzet_id)
 
 
 def _ep_id(endpoint_id: int) -> str:
-    # Stable logical id derived from tblEndpoint.endpointkey
-    return f"ep-{endpoint_id}"
+    """Generate Endpoint ID (stable logical id derived from tblEndpoint.endpointkey)."""
+    return _id("ep", endpoint_id)
 
 
 
@@ -1647,6 +1850,7 @@ def _get_bearer_token(cfg: Config, session: Optional[requests.Session] = None) -
     # Do NOT send FHIR content-type headers to the token endpoint.
     token_headers = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
 
+    resp: Optional[requests.Response] = None
     try:
         resp = (session.post if session is not None else requests.post)(
             str(cfg.oauth_token_url),
@@ -1656,8 +1860,8 @@ def _get_bearer_token(cfg: Config, session: Optional[requests.Session] = None) -
         )
         resp.raise_for_status()
     except requests.HTTPError:
-        body = _response_excerpt(resp) if "resp" in locals() else ""
-        oo = _try_json(resp) if "resp" in locals() else None
+        body = _response_excerpt(resp) if resp is not None else ""
+        oo = _try_json(resp) if resp is not None else None
         if isinstance(oo, dict) and oo.get("resourceType") == "OperationOutcome":
             msg = _format_operation_outcome(oo)
             if msg:
@@ -2350,25 +2554,171 @@ def _validate_transaction_response_entries(cfg: Config, request_entries: List[Di
             details = _format_operation_outcome(outcome) or ""
             warnings.append(f"{method} {url} -> {code} returned OperationOutcome: {details}".strip())
 
-    for w in warnings[:10]:
+    for w in warnings[:MAX_DEBUG_ITEMS]:
         logger.warning("Transaction-response validation: %s", w)
 
     if errors:
-        for e in errors[:25]:
+        for e in errors[:MAX_ERROR_ITEMS]:
             logger.error("Transaction entry failed: %s", e)
         raise RuntimeError(f"FHIR transaction had {len(errors)} failing entry(ies). See logs for details.")
 
 
-def _publish_transaction_bundle(
-    cfg: Config, session: requests.Session, headers: Dict[str, str], entries: List[Dict[str, Any]]
+def _provenance_id(bundle_index: Optional[int] = None) -> str:
+    base = RUN_ID.replace("-", "")
+    if bundle_index is None:
+        return f"prov-{base}"
+    return f"prov-{base}-{bundle_index}"
+
+
+def _build_provenance_resource(
+    cfg: Config,
+    entries: List[Dict[str, Any]],
+    bundle_timestamp: dt.datetime,
+    bundle_index: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    targets: List[Dict[str, Any]] = []
+    seen_targets: Set[str] = set()
+
+    for entry in entries:
+        req = entry.get("request") if isinstance(entry, dict) else {}
+        method = str(req.get("method") or "").upper()
+        if method == "DELETE":
+            continue
+        url = str(req.get("url") or "")
+        if "/" not in url:
+            continue
+        resource_type, resource_id = url.split("/", 1)
+        if not resource_type or not resource_id:
+            continue
+        reference = f"{resource_type}/{resource_id}"
+        if reference in seen_targets:
+            continue
+        seen_targets.add(reference)
+        targets.append({"reference": reference})
+
+    if not targets:
+        return None
+
+    who: Dict[str, Any] = {"display": "ITI-130 Publisher"}
+    author_ura = _normalize_ura(cfg.publisher_ura or cfg.default_ura)
+    if author_ura:
+        who["identifier"] = {"system": URA_SYSTEM, "value": author_ura}
+
+    return _prune({
+        "resourceType": "Provenance",
+        "id": _provenance_id(bundle_index),
+        "meta": _meta_dict(cfg, bundle_timestamp),
+        "target": targets,
+        "recorded": _fhir_instant(bundle_timestamp),
+        "activity": {
+            "coding": [
+                {
+                    "system": PROVENANCE_ACTIVITY_SYSTEM,
+                    "code": PROVENANCE_ACTIVITY_CODE,
+                    "display": PROVENANCE_ACTIVITY_DISPLAY,
+                }
+            ]
+        },
+        "agent": [
+            {
+                "type": {
+                    "coding": [
+                        {
+                            "system": PROVENANCE_PARTICIPANT_TYPE_SYSTEM,
+                            "code": PROVENANCE_PARTICIPANT_TYPE_AUTHOR,
+                        }
+                    ]
+                },
+                "who": who,
+            }
+        ],
+    })
+
+
+def _entry_generates_provenance_target(entry: Dict[str, Any]) -> bool:
+    req = entry.get("request") if isinstance(entry, dict) else {}
+    method = str(req.get("method") or "").upper()
+    if method == "DELETE":
+        return False
+    url = str(req.get("url") or "")
+    if "/" not in url:
+        return False
+    resource_type, resource_id = url.split("/", 1)
+    if not resource_type or not resource_id:
+        return False
+    return True
+
+
+
+def _chunk_transaction_entries(cfg: Config, entries: List[Dict[str, Any]]) -> Iterable[Tuple[List[Dict[str, Any]], bool]]:
+    bundle_size = int(getattr(cfg, "bundle_size", 0) or 0)
+    include_provenance_global = bool(getattr(cfg, "include_provenance", False))
+    if bundle_size <= 1 or not include_provenance_global:
+        for chunk in _chunk(entries, max(1, bundle_size)):
+            yield chunk, False
+        return
+
+    current_chunk: List[Dict[str, Any]] = []
+    current_has_provenance = False
+
+    for entry in entries:
+        entry_has_provenance = _entry_generates_provenance_target(entry)
+        next_has_provenance = current_has_provenance or entry_has_provenance
+        next_size = len(current_chunk) + 1 + (1 if next_has_provenance else 0)
+
+        if current_chunk and next_size > bundle_size:
+            yield current_chunk, current_has_provenance
+            current_chunk = [entry]
+            current_has_provenance = entry_has_provenance
+        else:
+            current_chunk.append(entry)
+            current_has_provenance = next_has_provenance
+
+    if current_chunk:
+        yield current_chunk, current_has_provenance
+
+
+
+def _build_transaction_bundle(
+    cfg: Config,
+    entries: List[Dict[str, Any]],
+    bundle_timestamp: dt.datetime,
+    bundle_index: Optional[int] = None,
+    include_provenance: bool = False,
 ) -> Dict[str, Any]:
-    """Publish a FHIR transaction Bundle (ITI-130 feed) and return response JSON."""
-    bundle = {
+    bundle_entries = list(entries)
+    provenance = None
+    if include_provenance:
+        provenance = _build_provenance_resource(cfg, bundle_entries, bundle_timestamp, bundle_index)
+    if provenance:
+        bundle_entries.append(
+            {
+                "fullUrl": f"{cfg.fhir_base.rstrip('/')}/Provenance/{provenance['id']}",
+                "resource": provenance,
+                "request": {"method": "PUT", "url": f"Provenance/{provenance['id']}"},
+            }
+        )
+    return {
         "resourceType": "Bundle",
         "type": "transaction",
-        "entry": entries,
+        # timestamp helps the receiving server with audit and ordering (FHIR R4 §9.16)
+        "timestamp": _fhir_instant(bundle_timestamp),
+        "entry": bundle_entries,
     }
 
+
+def _publish_transaction_bundle(
+    cfg: Config,
+    session: requests.Session,
+    headers: Dict[str, str],
+    entries: List[Dict[str, Any]],
+    bundle_index: Optional[int] = None,
+    include_provenance: bool = False,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Publish a FHIR transaction Bundle (ITI-130 feed) and return response JSON + Retry-After."""
+    bundle_timestamp = dt.datetime.now(dt.timezone.utc)
+    bundle = _build_transaction_bundle(cfg, entries, bundle_timestamp, bundle_index, include_provenance=include_provenance)
+    bundle_entries = bundle.get("entry") or []
     url = cfg.fhir_base.rstrip("/")
 
     t0 = time.perf_counter()
@@ -2391,7 +2741,7 @@ def _publish_transaction_bundle(
         raise
 
     elapsed = time.perf_counter() - t0
-    logger.info("FHIR transaction POST status=%s entries=%s elapsed=%.3fs", resp.status_code, len(entries), elapsed)
+    logger.info("FHIR transaction POST status=%s entries=%s elapsed=%.3fs", resp.status_code, len(bundle_entries), elapsed)
 
     try:
         resp.raise_for_status()
@@ -2420,8 +2770,8 @@ def _publish_transaction_bundle(
         )
         raise RuntimeError("FHIR server returned an invalid response (expected JSON object).")
 
-    _validate_transaction_response_entries(cfg, entries, payload)
-    return payload
+    _validate_transaction_response_entries(cfg, bundle_entries, payload)
+    return payload, resp.headers.get("Retry-After")
 
 
 
@@ -2743,8 +3093,11 @@ def _fhir_reset_server(cfg: Config, session: requests.Session, headers: Dict[str
                 "request": {"method": "DELETE", "url": f"{rtype}/{rid}"},
             })
 
-        for chunk in _chunk(entries, int(cfg.bundle_size)):
-            _publish_transaction_bundle(cfg, session, headers, chunk)
+        transaction_chunks = list(_chunk_transaction_entries(cfg, entries))
+        total_chunks = len(transaction_chunks)
+        for chunk_index, (chunk, include_provenance) in enumerate(transaction_chunks, start=1):
+            _payload, retry_after = _publish_transaction_bundle(cfg, session, headers, chunk, chunk_index, include_provenance=include_provenance)
+            _maybe_pause_after_chunk(cfg, retry_after, chunk_index, total_chunks)
         total_deleted += len(ids)
 
     logger.warning("FHIR reset complete: deleted %s resources.", total_deleted)
@@ -2773,10 +3126,14 @@ def _build_endpoints(
     profiles = _profiles_for("Endpoint", cfg)
 
     for e in endpoint_rows:
-        endpoint_id = int(e["EndpointId"])
-        kliniek_id = int(e["KliniekId"])
-        locatie_id = int(e["LocatieId"]) if e.get("LocatieId") is not None else None
-        afdeling_id = int(e["AfdelingId"]) if e.get("AfdelingId") is not None else None
+        try:
+            endpoint_id = int(e["EndpointId"])
+            kliniek_id = int(e["KliniekId"])
+            locatie_id = int(e["LocatieId"]) if e.get("LocatieId") is not None else None
+            afdeling_id = int(e["AfdelingId"]) if e.get("AfdelingId") is not None else None
+        except (KeyError, TypeError, ValueError) as _exc:
+            logger.warning("_build_endpoints: skipping malformed row (id columns unreadable): %s", _exc)
+            continue
 
         eid = _ep_id(endpoint_id)
 
@@ -2831,7 +3188,7 @@ def _build_endpoints(
         out.append(_prune({
             "resourceType": "Endpoint",
             "id": eid,
-            "meta": {"profile": profiles} if profiles else None,
+            "meta": _meta_dict(cfg, e.get("LaatstGewijzigdOp"), profiles),
             "status": status,
             "connectionType": conn_coding,
             "payloadType": payload_types,
@@ -2862,6 +3219,8 @@ def _build_organizations(
     afdeling_rows: List[Dict[str, Any]],
     ep_by_kliniek: Dict[int, List[str]],
     ep_by_afdeling: Dict[int, List[str]],
+    endpoint_last_updated_by_kliniek: Dict[int, dt.datetime],
+    endpoint_last_updated_by_afdeling: Dict[int, dt.datetime],
 ) -> Tuple[List[Dict[str, Any]], Dict[int, str], Dict[int, str]]:
     """Build Organization resources (Kliniek + Afdeling as child Organization).
 
@@ -2927,7 +3286,7 @@ def _build_organizations(
                 {
                     "resourceType": "Organization",
                     "id": org_id,
-                    "meta": {"profile": profiles} if profiles else None,
+                    "meta": _meta_dict(cfg, _max_last_updated(k.get("LaatstGewijzigdOp"), endpoint_last_updated_by_kliniek.get(kliniek_id)), profiles),
                     "active": active,
                     "identifier": identifiers,
                     "type": types,
@@ -2975,8 +3334,10 @@ def _build_organizations(
                 {
                     "resourceType": "Organization",
                     "id": afdeling_org_id,
-                    "meta": {"profile": profiles} if profiles else None,
-                    "active": bool(a.get("Actief", True)),
+                    "meta": _meta_dict(cfg, _max_last_updated(a.get("LaatstGewijzigdOp"), endpoint_last_updated_by_afdeling.get(afdeling_id)), profiles),
+                    # Use _is_active_from_dates for consistency; afdelingen have no
+                    # date columns in this schema, so start_date/end_date are None.
+                    "active": _is_active_from_dates(bool(a.get("Actief", True)), None, None),
                     "identifier": identifiers,
                     "type": dept_types,
                     "name": a.get("Naam") or f"Afdeling {afdeling_id}",
@@ -2995,6 +3356,8 @@ def _build_locations(
     ep_by_locatie: Dict[int, List[str]],
     ura_by_kliniek: Dict[int, str],
     name_by_kliniek: Dict[int, str],
+    kliniek_locatie_last_updated_by_locatie: Dict[int, dt.datetime],
+    endpoint_last_updated_by_locatie: Dict[int, dt.datetime],
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     profiles = _profiles_for("Location", cfg)
@@ -3054,7 +3417,7 @@ def _build_locations(
                 {
                     "resourceType": "Location",
                     "id": loc_fhir_id,
-                    "meta": {"profile": profiles} if profiles else None,
+                    "meta": _meta_dict(cfg, _max_last_updated(l.get("LaatstGewijzigdOp"), kliniek_locatie_last_updated_by_locatie.get(locatie_id), endpoint_last_updated_by_locatie.get(locatie_id)), profiles),
                     "identifier": identifiers,
                     "status": status,
                     "mode": mode,
@@ -3091,6 +3454,8 @@ def _build_healthcare_services(
     ep_by_afdeling: Dict[int, List[str]],
     ura_by_kliniek: Dict[int, str],
     name_by_kliniek: Dict[int, str],
+    kliniek_locatie_last_updated_by_kliniek: Dict[int, dt.datetime],
+    endpoint_last_updated_by_afdeling: Dict[int, dt.datetime],
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     profiles = _profiles_for("HealthcareService", cfg)
@@ -3136,9 +3501,9 @@ def _build_healthcare_services(
                 {
                     "resourceType": "HealthcareService",
                     "id": svc_id,
-                    "meta": {"profile": profiles} if profiles else None,
+                    "meta": _meta_dict(cfg, _max_last_updated(a.get("LaatstGewijzigdOp"), endpoint_last_updated_by_afdeling.get(afdeling_id), kliniek_locatie_last_updated_by_kliniek.get(kliniek_id) if a.get("LocatieId") is None else None), profiles),
                     "identifier": identifiers,
-                    "active": bool(a.get("Actief", True)),
+                    "active": _is_active_from_dates(bool(a.get("Actief", True)), None, None),
                     "providedBy": _ref("Organization", _org_kliniek_id(kliniek_id)),
                     "name": a.get("Naam") or f"Service {afdeling_id}",
                     "type": svc_types,
@@ -3250,7 +3615,7 @@ def _build_practitioners(
                 {
                     "resourceType": "Practitioner",
                     "id": prac_id,
-                    "meta": {"profile": profiles} if profiles else None,
+                    "meta": _meta_dict(cfg, m.get("LaatstGewijzigdOp"), profiles),
                     "active": active,
                     "identifier": identifiers,
                     "name": [_human_name(m)],
@@ -3296,6 +3661,9 @@ def _build_practitioner_roles(
     ep_by_afdeling: Dict[int, List[str]],
     ura_by_kliniek: Dict[int, str],
     name_by_kliniek: Dict[int, str],
+    endpoint_last_updated_by_kliniek: Dict[int, dt.datetime],
+    endpoint_last_updated_by_locatie: Dict[int, dt.datetime],
+    endpoint_last_updated_by_afdeling: Dict[int, dt.datetime],
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     profiles = _profiles_for("PractitionerRole", cfg)
@@ -3388,7 +3756,7 @@ def _build_practitioner_roles(
         out.append(_prune({
             "resourceType": "PractitionerRole",
             "id": role_id,
-            "meta": {"profile": profiles} if profiles else None,
+            "meta": _meta_dict(cfg, _max_last_updated(inz.get("LaatstGewijzigdOp"), m.get("LaatstGewijzigdOp"), afdeling.get("LaatstGewijzigdOp") if afdeling else None, endpoint_last_updated_by_kliniek.get(kliniek_id), endpoint_last_updated_by_afdeling.get(afdeling_id) if afdeling_id is not None else None, [endpoint_last_updated_by_locatie.get(lid) for lid in loc_ids]), profiles),
             "identifier": identifiers,
             "active": active,
             "period": _prune({
@@ -3417,7 +3785,8 @@ def _changed_ids(rows: List[Dict[str, Any]], id_col: str, modified_col: str, sin
         try:
             if ts >= since_naive:
                 out.add(int(r[id_col]))
-        except Exception:
+        except (KeyError, TypeError, ValueError) as _exc:
+            logger.debug("_changed_ids: skipping row with unreadable key %r: %s", id_col, _exc)
             continue
     return out
 
@@ -3427,8 +3796,9 @@ def _validate_kliniek_ura_source(cfg: Config, kliniek_rows: List[Dict[str, Any]]
     missing_kliniek_ids: List[int] = []
     for k in kliniek_rows:
         try:
-            kliniek_id = int(k.get("KliniekId"))
-        except Exception:
+            kliniek_id = int(k.get("KliniekId"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            logger.warning("_validate_kliniek_ura_source: kliniek row with invalid KliniekId skipped.")
             continue
         ura_value = _normalize_ura(cfg.publisher_ura or k.get("URANummer") or cfg.default_ura)
         if not ura_value:
@@ -3454,6 +3824,19 @@ def _validate_kliniek_ura_source(cfg: Config, kliniek_rows: List[Dict[str, Any]]
             + ". Geef elke kliniek een eigen URA (tblKliniek.uranummer)."
         )
 def run(cfg: Config) -> None:
+    """Main entry point: read EPD tables, build FHIR resources, publish via ITI-130.
+
+    High-level flow:
+      1. Validate config and emit startup diagnostics.
+      2. Obtain bearer token (static or OAuth2 client_credentials).
+      3. Optionally wipe the FHIR server (--fhir-reset-seed).
+      4. Connect to the EPD database and read all relevant tables.
+      5. Build FHIR resources (Endpoint, Organization, Location, HealthcareService,
+         Practitioner, PractitionerRole) from the rows.
+      6. Apply best-effort delta filtering when --since is set.
+      7. Run sanity checks (duplicate ids, broken references, BGZ policy).
+      8. Release the DB connection, then publish via FHIR transaction Bundles.
+    """
     _validate_and_log_config(cfg)
 
     with _build_http_session(cfg) as session:
@@ -3610,6 +3993,7 @@ def run(cfg: Config) -> None:
             if cfg.include_practitioners:
                 if dialect == "sqlite":
                     medewerker_rows = _fetch_rows(conn, _SQLITE_QUERIES["medewerker"])
+                    inzet_rows = _fetch_rows(conn, _SQLITE_QUERIES["inzet"])
                 elif since_naive:
                     # --since optimisation: load only practitioners/roles relevant for this delta.
                     pre_changed_kliniek_ids = _changed_ids(kliniek_rows, "KliniekId", "LaatstGewijzigdOp", since_naive)
@@ -3807,6 +4191,7 @@ def run(cfg: Config) -> None:
                 # We also include endpoints that *start* or *end* between since and today (their
                 # effective status may flip without LaatstGewijzigdOp changing).
                 changed_endpoint_ids = _changed_ids(endpoint_rows, "EndpointId", "LaatstGewijzigdOp", since_naive)
+                # Cache today once so all date comparisons in this block are consistent.
                 since_date = since_naive.date()
                 today_date = dt.date.today()
                 for e in endpoint_rows:
@@ -3868,6 +4253,20 @@ def run(cfg: Config) -> None:
                     continue
                 kliniek_by_locatie.setdefault(lid, kid)
 
+            endpoint_last_updated_by_kliniek: Dict[int, dt.datetime] = {}
+            endpoint_last_updated_by_locatie: Dict[int, dt.datetime] = {}
+            endpoint_last_updated_by_afdeling: Dict[int, dt.datetime] = {}
+            for endpoint_row in endpoint_rows:
+                _set_max_datetime(endpoint_last_updated_by_kliniek, endpoint_row.get("KliniekId"), endpoint_row.get("LaatstGewijzigdOp"))
+                _set_max_datetime(endpoint_last_updated_by_locatie, endpoint_row.get("LocatieId"), endpoint_row.get("LaatstGewijzigdOp"))
+                _set_max_datetime(endpoint_last_updated_by_afdeling, endpoint_row.get("AfdelingId"), endpoint_row.get("LaatstGewijzigdOp"))
+
+            kliniek_locatie_last_updated_by_locatie: Dict[int, dt.datetime] = {}
+            kliniek_locatie_last_updated_by_kliniek: Dict[int, dt.datetime] = {}
+            for kliniek_locatie_row in kliniek_locatie_rows:
+                _set_max_datetime(kliniek_locatie_last_updated_by_locatie, kliniek_locatie_row.get("LocatieId"), kliniek_locatie_row.get("LaatstGewijzigdOp"))
+                _set_max_datetime(kliniek_locatie_last_updated_by_kliniek, kliniek_locatie_row.get("KliniekId"), kliniek_locatie_row.get("LaatstGewijzigdOp"))
+
             # Derive Endpoints first so we can attach to Organizations/Locations/Services
             ep_resources_all, ep_by_kliniek, ep_by_locatie, ep_by_afdeling = _build_endpoints(cfg, endpoint_rows)
 
@@ -3878,13 +4277,32 @@ def run(cfg: Config) -> None:
                 afdeling_rows,
                 ep_by_kliniek,
                 ep_by_afdeling,
+                endpoint_last_updated_by_kliniek,
+                endpoint_last_updated_by_afdeling,
             )
 
             # Locations
-            loc_resources_all = _build_locations(cfg, locatie_rows, ep_by_locatie, ura_by_kliniek, name_by_kliniek)
+            loc_resources_all = _build_locations(
+                cfg,
+                locatie_rows,
+                ep_by_locatie,
+                ura_by_kliniek,
+                name_by_kliniek,
+                kliniek_locatie_last_updated_by_locatie,
+                endpoint_last_updated_by_locatie,
+            )
 
             # HealthcareService 1:1 from Afdeling
-            svc_resources_all = _build_healthcare_services(cfg, afdeling_rows, locaties_by_kliniek, ep_by_afdeling, ura_by_kliniek, name_by_kliniek)
+            svc_resources_all = _build_healthcare_services(
+                cfg,
+                afdeling_rows,
+                locaties_by_kliniek,
+                ep_by_afdeling,
+                ura_by_kliniek,
+                name_by_kliniek,
+                kliniek_locatie_last_updated_by_kliniek,
+                endpoint_last_updated_by_afdeling,
+            )
 
             # Practitioners + PractitionerRoles (from inzet)
             prac_resources_all: List[Dict[str, Any]] = []
@@ -3902,6 +4320,9 @@ def run(cfg: Config) -> None:
                     ep_by_afdeling,
                     ura_by_kliniek,
                     name_by_kliniek,
+                    endpoint_last_updated_by_kliniek,
+                    endpoint_last_updated_by_locatie,
+                    endpoint_last_updated_by_afdeling,
                 )
 
             # Apply best-effort delta filtering to derived resources
@@ -3985,8 +4406,10 @@ def run(cfg: Config) -> None:
 
                     pracrole_resources = [r for r in pracrole_resources_all if int(r["id"].split("-")[1]) in changed_role_ids]
 
+        # Collect all resources into plain Python lists; DB connection is no longer
+        # needed after this point so it will be released when the with-block exits.
         all_resources: List[Dict[str, Any]] = []
-        # Order is not strictly required in FHIR transaction, but it helps readability/debugging.
+        # Order is not strictly required in FHIR transaction, but helps readability/debugging.
         all_resources.extend(ep_resources)
         all_resources.extend(org_resources)
         all_resources.extend(loc_resources)
@@ -3998,35 +4421,35 @@ def run(cfg: Config) -> None:
         _sanity_check(cfg, all_resources, since_naive, endpoint_resources_all=ep_resources_all, organization_resources_all=org_resources_all)
 
         entries = _bundle_entries(cfg, all_resources)
+        # ep_resources_all / org_resources_all captured above; DB can be released now.
 
-        if not entries:
-            print("[OK] No entries to publish.")
-            return
+    # ── DB connection released here ──────────────────────────────────────────
+    # Everything below only needs the in-memory resource lists and the HTTP session.
 
-        if cfg.dry_run:
-            bundle = {
-                "resourceType": "Bundle",
-                "type": "transaction",
-                "entry": entries,
-            }
-            if cfg.out_file:
-                with open(cfg.out_file, "w", encoding="utf-8") as f:
-                    json.dump(bundle, f, indent=2, ensure_ascii=False)
-                print(f"[OK] Wrote bundle to {cfg.out_file}")
-            else:
-                print(json.dumps(bundle, indent=2, ensure_ascii=False))
-            return
+    if not entries:
+        print("[OK] No entries to publish.")
+        return
 
-        total_entries = len(entries)
-        total_chunks = 1
-        if cfg.bundle_size and int(cfg.bundle_size) > 0:
-            total_chunks = (total_entries + int(cfg.bundle_size) - 1) // int(cfg.bundle_size)
-        logger.info("Publishing %s entries in %s transaction(s) (bundle_size=%s).", total_entries, total_chunks, cfg.bundle_size)
+    if cfg.dry_run:
+        bundle = _build_transaction_bundle(cfg, entries, dt.datetime.now(dt.timezone.utc), include_provenance=bool(getattr(cfg, "include_provenance", False)))
+        if cfg.out_file:
+            with open(cfg.out_file, "w", encoding="utf-8") as f:
+                json.dump(bundle, f, indent=2, ensure_ascii=False)
+            print(f"[OK] Wrote bundle to {cfg.out_file}")
+        else:
+            print(json.dumps(bundle, indent=2, ensure_ascii=False))
+        return
 
-        for chunk_index, chunk in enumerate(_chunk(entries, cfg.bundle_size), start=1):
-            logger.info("Publishing chunk %s/%s (entries=%s).", chunk_index, total_chunks, len(chunk))
-            resp = _publish_transaction_bundle(cfg, session, headers, chunk)
-            print("[OK] Published chunk:", resp.get("id") or "(no bundle id)")
+    total_entries = len(entries)
+    transaction_chunks = list(_chunk_transaction_entries(cfg, entries))
+    total_chunks = len(transaction_chunks)
+    logger.info("Publishing %s entries in %s transaction(s) (bundle_size=%s).", total_entries, total_chunks, cfg.bundle_size)
+
+    for chunk_index, (chunk, include_provenance) in enumerate(transaction_chunks, start=1):
+        logger.info("Publishing chunk %s/%s (entries=%s).", chunk_index, total_chunks, len(chunk))
+        resp, retry_after = _publish_transaction_bundle(cfg, session, headers, chunk, chunk_index, include_provenance=include_provenance)
+        _maybe_pause_after_chunk(cfg, retry_after, chunk_index, total_chunks)
+        print("[OK] Published chunk:", resp.get("id") or "(no bundle id)")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -4077,6 +4500,45 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--include-meta-lastupdated",
+        dest="include_meta_lastupdated",
+        action="store_true",
+        default=None,
+        help="Publish resource.meta.lastUpdated values derived from source timestamps.",
+    )
+    p.add_argument(
+        "--no-meta-lastupdated",
+        dest="include_meta_lastupdated",
+        action="store_false",
+        help="Do not publish resource.meta.lastUpdated values.",
+    )
+    p.add_argument(
+        "--include-meta-source",
+        dest="include_meta_source",
+        action="store_true",
+        default=None,
+        help="Publish resource.meta.source. Use --publisher-source to override the value.",
+    )
+    p.add_argument(
+        "--no-meta-source",
+        dest="include_meta_source",
+        action="store_false",
+        help="Do not publish resource.meta.source.",
+    )
+    p.add_argument(
+        "--include-provenance",
+        dest="include_provenance",
+        action="store_true",
+        default=None,
+        help="Include a Provenance resource per transaction bundle.",
+    )
+    p.add_argument(
+        "--no-provenance",
+        dest="include_provenance",
+        action="store_false",
+        help="Do not include Provenance resources (default).",
+    )
+    p.add_argument(
         "--profile-set",
         choices=["nl", "ihe", "none"],
         default=None,
@@ -4109,6 +4571,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Hard override for the URA used to identify the publishing organization (PoC/prod switch without DB changes). "
             "When set, this value is used for Organization.identifier(URA) and as the assigner URA for AssignedId identifiers on Organization/Location/HealthcareService/etc. "
             "If not set, URANummer from brondata is used; if that is missing, --default-ura is the fallback."
+        ),
+    )
+    p.add_argument(
+        "--publisher-source",
+        default=None,
+        help=(
+            "Stable absolute URI/URN to publish in resource.meta.source. "
+            "If omitted, assigned-id-system-base + '/iti130-publisher' is used."
         ),
     )
     p.add_argument(
@@ -4171,13 +4641,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # HTTP behaviour
     p.add_argument("--timeout", type=int, default=None, help="HTTP read timeout in seconds.")
     p.add_argument("--connect-timeout", type=float, default=None, help="HTTP connect timeout in seconds.")
-    p.add_argument("--http-retries", type=int, default=None, help="HTTP retries on network/status errors (0=disabled).")
+    p.add_argument("--http-retries", type=int, default=None, help="HTTP retries on network/status errors (0=disabled; production default is 3).")
     p.add_argument("--http-backoff", type=float, default=None, help="Retry backoff factor (e.g., 0.5).")
     p.add_argument("--http-pool-connections", type=int, default=None, help="HTTP connection pool: number of pools.")
     p.add_argument("--http-pool-maxsize", type=int, default=None, help="HTTP connection pool: max connections per pool.")
+    p.add_argument("--publish-delay", type=float, default=None, help="Minimum delay in seconds between transaction bundles.")
+    p.add_argument("--max-retry-after", type=int, default=None, help="Maximum Retry-After delay in seconds to honor between bundles.")
 
     # Observability / safety
     p.add_argument("--log-level", default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
+    p.add_argument("--log-format", choices=["json", "text"], default=None, help="Log format (default: json).")
     p.add_argument("--production", action="store_true", help="Treat risky settings as errors (e.g. http:// fhir-base, --no-verify-tls).")
 
     return p
@@ -4193,6 +4666,8 @@ def main() -> int:
     except Exception as e:
         print(f"Invalid environment/.env settings: {e}", file=sys.stderr)
         return 2
+
+    settings_fields_set = getattr(settings, "model_fields_set", set())
 
     if not args.sql_conn:
         args.sql_conn = settings.sql_conn
@@ -4224,6 +4699,14 @@ def main() -> int:
         args.default_ura = settings.default_ura
     if getattr(args, "publisher_ura", None) is None:
         args.publisher_ura = settings.publisher_ura
+    if getattr(args, "include_meta_lastupdated", None) is None:
+        args.include_meta_lastupdated = bool(getattr(settings, "include_meta_lastupdated", False))
+    if getattr(args, "include_meta_source", None) is None:
+        args.include_meta_source = bool(getattr(settings, "include_meta_source", False))
+    if getattr(args, "include_provenance", None) is None:
+        args.include_provenance = bool(getattr(settings, "include_provenance", False))
+    if getattr(args, "publisher_source", None) is None:
+        args.publisher_source = settings.publisher_source
     if args.bgz_policy is None:
         args.bgz_policy = settings.bgz_policy
     if args.mtls_cert is None:
@@ -4235,15 +4718,26 @@ def main() -> int:
     if args.connect_timeout is None:
         args.connect_timeout = settings.connect_timeout_seconds
     if args.http_retries is None:
-        args.http_retries = settings.http_retries
+        if "http_retries" in settings_fields_set:
+            args.http_retries = settings.http_retries
+        elif bool(args.production):
+            args.http_retries = 3
+        else:
+            args.http_retries = settings.http_retries
     if args.http_backoff is None:
         args.http_backoff = settings.http_backoff_factor
     if args.http_pool_connections is None:
         args.http_pool_connections = settings.http_pool_connections
     if args.http_pool_maxsize is None:
         args.http_pool_maxsize = settings.http_pool_maxsize
+    if args.publish_delay is None:
+        args.publish_delay = settings.publish_delay_seconds
+    if args.max_retry_after is None:
+        args.max_retry_after = settings.max_retry_after_seconds
     if args.log_level is None:
         args.log_level = settings.log_level
+    if args.log_format is None:
+        args.log_format = settings.log_format
 
     # Validate settings that bypass argparse choices
     if args.profile_set is not None and str(args.profile_set).strip().lower() not in ("nl", "ihe", "none"):
@@ -4251,6 +4745,9 @@ def main() -> int:
         return 2
     if args.bgz_policy is not None and str(args.bgz_policy).strip().lower() not in ("off", "any", "per-clinic", "per-afdeling", "per-afdeling-or-clinic"):
         print("Invalid --bgz-policy (expected off|any|per-clinic|per-afdeling|per-afdeling-or-clinic).", file=sys.stderr)
+        return 2
+    if args.log_format is not None and str(args.log_format).strip().lower() not in ("json", "text"):
+        print("Invalid --log-format (expected 'json'|'text').", file=sys.stderr)
         return 2
 
     if not args.sql_conn:
@@ -4311,6 +4808,10 @@ def main() -> int:
         assigned_id_system_base=str(args.assigned_id_system_base or "").strip() or "https://sys.local/identifiers",
         default_ura=_normalize_ura(args.default_ura) or None,
         publisher_ura=_normalize_ura(getattr(args, "publisher_ura", None)) or None,
+        include_meta_lastupdated=bool(getattr(args, "include_meta_lastupdated", False)),
+        include_meta_source=bool(getattr(args, "include_meta_source", False)),
+        include_provenance=bool(getattr(args, "include_provenance", False)),
+        publisher_source=str(getattr(args, "publisher_source", None) or "").strip() or None,
         default_endpoint_payload_types=tuple(default_payload_types),
         bgz_policy=str(args.bgz_policy or "per-clinic"),
         mtls_cert=str(args.mtls_cert).strip() if args.mtls_cert else None,
@@ -4327,11 +4828,14 @@ def main() -> int:
         http_pool_maxsize=max(1, int(args.http_pool_maxsize)),
         http_retries=max(0, int(args.http_retries)),
         http_backoff_factor=float(args.http_backoff),
+        publish_delay_seconds=max(0.0, float(args.publish_delay)),
+        max_retry_after_seconds=max(0, int(args.max_retry_after)),
         log_level=str(args.log_level or "INFO"),
+        log_format=str(args.log_format or "json"),
         is_production=bool(args.production),
     )
 
-    _configure_logging(cfg.log_level)
+    _configure_logging(cfg.log_level, cfg.log_format)
 
     try:
         run(cfg)

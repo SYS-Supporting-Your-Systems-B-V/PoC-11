@@ -1,10 +1,16 @@
+# ---------------------------------------------------------------------------
+# Fork/starter template for new setups.
+# Fields marked [ORG-SPECIFIC] should be reviewed and replaced for your setup.
+# ---------------------------------------------------------------------------
 [app]
 # Loglevel can be one of: debug, info, warning, error, critical
 loglevel=debug
+# [ORG-SPECIFIC] Optional URA override for auth-related flows.
 override_authentication_ura=
 
 [database]
 # Dsn for database connection
+# Local PoC default. [ORG-SPECIFIC] Change when using a different DB host/user.
 dsn=postgresql+psycopg://postgres:postgres@postgres:5432/mcsd_update_client
 create_tables=false
 retry_backoff=0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 4.8, 6.4, 10.0
@@ -27,6 +33,7 @@ automatic_background_cleanup = True
 # Telemetry is enabled or not
 enabled = False
 # Endpoint to GRPC server for telemetry
+# [ORG-SPECIFIC] Set this when telemetry is enabled.
 endpoint = http://tracing:4317
 # Service name to use
 service_name = Mcsd Update service
@@ -77,15 +84,16 @@ ssl_cert_file = server.cert
 ssl_key_file = server.key
 
 [mcsd]
+# Local stack default. [ORG-SPECIFIC] Change when update client FHIR endpoint differs.
 update_client_url = http://hapi-update-client:8081/fhir
 # authentication can be either "off", or "azure_oauth2" in case of azure oauth2 authentication
 authentication = off
 # When configured, all connections to the supplier register and mCSD FHIR directories will use mTLS
-# Path to client certificate file for mTLS authentication
+# [ORG-SPECIFIC] Path to client certificate file for mTLS authentication
 mtls_client_cert_path =
-# Path to client private key file for mTLS authentication
+# [ORG-SPECIFIC] Path to client private key file for mTLS authentication
 mtls_client_key_path =
-# Path to CA certificate file for server verification
+# [ORG-SPECIFIC] Path to CA certificate file for server verification
 mtls_server_ca_path_path =
 
 # query parameter for the number of entries in Bundle per request (limit)
@@ -102,6 +110,7 @@ allow_missing_resources = True
 
 [azure_oauth2]
 # Token url is the url of the oauth2 endpoint of the microsoft services
+# [ORG-SPECIFIC] Required when mcsd.authentication=azure_oauth2
 token_url =
 # Given client ID of the application
 client_id =
@@ -112,13 +121,15 @@ resource =
 
 [aws]
 # Profile to use for aws authentication
+# [ORG-SPECIFIC] Required when mcsd.authentication=aws
 profile =
 # Region of the healthlake
-region = eu-west-2
+region = eu-west-1
 
 [client_directory]
-# Directories provider url(s) to fetch directory endpoints from (comma-separated)
-directories_provider_urls = https://knooppunt-test.nuts-services.nl/lrza/mcsd
+# [ORG-SPECIFIC] Directory provider URL(s) (comma-separated), for example:
+# directories_provider_urls = https://directory-registry.example.org/lrza/mcsd
+directories_provider_urls =
 # OR use a relative path that points to file that specifies which directories to use.
 # See example file services/iti-91/directory_urls.example.json
 directories_file_path =

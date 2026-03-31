@@ -5,3 +5,4 @@ python-dotenv
 python-tds
 sqlalchemy-pytds
 requests
+pytest

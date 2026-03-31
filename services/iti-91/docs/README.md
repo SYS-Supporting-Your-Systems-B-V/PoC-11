@@ -1,8 +1,18 @@
 # MCSD Update client
 
-The MCSD update client allows you update FHIR resources conforming to the [mCSD specification](https://profiles.ihe.net/ITI/mCSD/volume-1.html#1-46-mobile-care-services-discovery-mcsd). This application is an implementation of [ITI-91](https://profiles.ihe.net/ITI/mCSD/ITI-91.html).
+This document explains the architecture of the MCSD update client. For actual
+startup instructions in this repository, use
+[`../README.md`](../README.md) and
+[`../../../poc9-start-stack/README.md`](../../../poc9-start-stack/README.md).
 
-Data from target FHIR directories is taken by continuously polling for mCSD resources, convert their references to point to the addressing FHIR server before updating the resources on that server.
+The MCSD update client updates FHIR resources that conform to the
+[mCSD specification](https://profiles.ihe.net/ITI/mCSD/volume-1.html#1-46-mobile-care-services-discovery-mcsd).
+This application is an implementation of
+[ITI-91](https://profiles.ihe.net/ITI/mCSD/ITI-91.html).
+
+It continuously polls one or more source directories for mCSD resources,
+rewrites internal references so they point to the addressing FHIR server, and
+then updates the transformed resources on that server.
 
 ```mermaid
 
@@ -27,7 +37,12 @@ graph TD
 
 ## Update service
 
-The Update service is responsible for polling from one or more FHIR directories for new or updated resources. It does so by comparing data against the addressing FHIR Directory and make decisions based on the outcome of the comparison. When an update is found, it modifies any internal id and references by namespacing them according to the id of the server it is polling data from. This is essential to avoid id collisions and so that references point to the addressing FHIR server before updating the resource on that server.
+The Update service polls one or more FHIR directories for new or updated
+resources. It compares incoming data with the addressing FHIR directory and
+decides which resources must be created, updated, or skipped. When an update is
+needed, it namespaces internal ids and references according to the source
+directory so ids do not collide and cross-resource references point to the
+addressing FHIR server.
 
 For instance, take the following Organization resource found in a directory:
 
@@ -55,15 +70,23 @@ In this case, the "id" is the original logical [id](https://build.fhir.org/resou
 }
 ```
 
-This allows for a consistent and unified view of resources across multiple directories, ensuring that all references are correctly resolved to the addressing FHIR server. And avoid any id conflicts between different directories the app is trying to pull data from.
+This creates a consistent aggregated view across multiple source directories and
+avoids id conflicts between them.
 
 ### Polling for update
 
-The update service a polling mechanism to periodically check one or more FHIR directories for new or updated resources. When a resource is detected, the client retrieves it, modifies any internal references to point to the addressing FHIR server, and then updates the resource on that server. This is done through the scheduler component, which triggers the polling process at regular intervals.
+The update service uses a polling mechanism to periodically check one or more
+FHIR directories for new or updated resources. When a resource change is
+detected, the client retrieves it, rewrites internal references, and then
+updates the transformed resource on the addressing server. The scheduler
+triggers this process at regular intervals.
 
 It will take care of only fetching resources that have been created or updated since the last successful poll, using the `_lastUpdated` search parameter. This ensures that the update process is efficient and only processes new or changed data.
 
-As part of the start of the polling process, the client will also validate that the FHIR directory supports the required mCSD resources and interactions by checking its CapabilityStatement at the designated `/metadata` endpoint. If the directory does not meet these requirements, the client will log an error and skip the update process for that directory. Only directories that pass this validation will be polled as they support the necessary operations for mCSD.
+As part of the polling process, the client can validate that the source
+directory supports the required mCSD resources and interactions by checking its
+CapabilityStatement at `/metadata`. If the directory does not meet those
+requirements, the client logs an error and skips updates for that directory.
 
 ## mCSD FHIR API
 

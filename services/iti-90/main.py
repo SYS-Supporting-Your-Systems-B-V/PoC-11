@@ -1,4 +1,4 @@
-# main.py
+# app.py
 import base64
 import copy
 import hashlib
@@ -19,26 +19,28 @@ from functools import lru_cache
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from fastapi import FastAPI, Query, HTTPException, Request, Depends, Header, Body
+from fastapi import FastAPI, Query, HTTPException, Request, Depends, Header, Body, Path as ApiPath
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
-from typing import Dict, Any, List, Optional, Tuple, Literal
+from typing import Annotated, Dict, Any, List, Optional, Tuple, Literal
 from urllib.parse import quote, urlparse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import Field, BaseModel
+from pydantic import Field, BaseModel, field_validator, ConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", stream=sys.stdout)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("mcsd.app")
 audit_logger = logging.getLogger("mcsd.audit")
-
-# Load settings after logging is configured so .env load logs are visible.
-from configs import settings, ALLOW_ORIGINS, ALLOWED_HOSTS
+APP_ROOT = Path(__file__).resolve().parent
 REQUEST_ID_CTX: ContextVar[str] = ContextVar("request_id", default="")
 UP_SEQ_CTX: ContextVar[int] = ContextVar("up_seq", default=0)
+_ENV_FILE_NAME = os.getenv("MCSD_ENV_FILE", ".env")
+_ENV_FILE_PATH = (Path(__file__).parent / _ENV_FILE_NAME).resolve()
 def _fmt_rid(rid: str) -> str:
     if not rid:
         return "-"
@@ -51,6 +53,79 @@ def _fmt_up_url(url: httpx.URL) -> str:
     except Exception:
         return str(url)
 
+class Settings(BaseSettings):
+    base_url: str = Field("https://example-fhir/mcsd", validation_alias="MCSD_BASE")
+    upstream_timeout: float = Field(30.0, validation_alias="MCSD_UPSTREAM_TIMEOUT")
+    bearer_token: Optional[str] = Field(None, validation_alias="MCSD_BEARER_TOKEN")
+    verify_tls: bool = Field(True, validation_alias="MCSD_VERIFY_TLS")
+    ca_certs_file: Optional[str] = Field(None, validation_alias="MCSD_CA_CERTS_FILE")
+    allow_origins: Annotated[List[str], NoDecode] = Field(["*"], validation_alias="MCSD_ALLOW_ORIGINS")
+    allowed_hosts: Annotated[List[str], NoDecode] = Field(["*"], validation_alias="MCSD_ALLOWED_HOSTS")
+    api_key: Optional[str] = Field(None, validation_alias="MCSD_API_KEY")
+    sender_ura: Optional[str] = Field(None, validation_alias="MCSD_SENDER_URA")
+    sender_name: Optional[str] = Field(None, validation_alias="MCSD_SENDER_NAME")
+    sender_uzi_sys: Optional[str] = Field(None, validation_alias="MCSD_SENDER_UZI_SYS")
+    sender_system_name: Optional[str] = Field(None, validation_alias="MCSD_SENDER_SYSTEM_NAME")
+    sender_bgz_base: Optional[str] = Field(None, validation_alias="MCSD_SENDER_BGZ_BASE")
+    audit_hmac_key: Optional[str] = Field(None, validation_alias="MCSD_AUDIT_HMAC_KEY")
+    allow_task_preview_in_production: bool = Field(False, validation_alias="MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION")
+    notifiedpull_enabled: bool = Field(True, validation_alias="MCSD_NOTIFIEDPULL_ENABLED")
+    log_level: str = Field("INFO", validation_alias="MCSD_LOG_LEVEL")
+    is_production: bool = Field(False, validation_alias="MCSD_IS_PRODUCTION")
+    httpx_max_connections: int = Field(50, validation_alias="MCSD_HTTPX_MAX_CONNECTIONS")
+    httpx_max_keepalive_connections: int = Field(20, validation_alias="MCSD_HTTPX_MAX_KEEPALIVE_CONNECTIONS")
+    max_query_params: int = Field(50, validation_alias="MCSD_MAX_QUERY_PARAMS")
+    max_query_value_length: int = Field(256, validation_alias="MCSD_MAX_QUERY_VALUE_LENGTH")
+    max_query_param_values: int = Field(20, validation_alias="MCSD_MAX_QUERY_PARAM_VALUES")
+    capability_cache_ttl_seconds: int = Field(600, validation_alias="MCSD_CAPABILITY_CACHE_TTL_SECONDS")
+    debug_dump_json: bool = Field(False, validation_alias="MCSD_DEBUG_DUMP_JSON")
+    debug_dump_dir: str = Field("/tmp/mcsd-debug", validation_alias="MCSD_DEBUG_DUMP_DIR")
+    debug_dump_redact: bool = Field(True, validation_alias="MCSD_DEBUG_DUMP_REDACT")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE_PATH),
+        case_sensitive=False,
+    )
+
+    @staticmethod
+    def _parse_list_value(value: Any) -> List[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if not isinstance(value, str):
+            raise TypeError("Expected a string or list for list-like setting")
+        raw = value.strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            parsed = json.loads(raw)
+            if not isinstance(parsed, list):
+                raise ValueError("Expected JSON array for list-like setting")
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        return [part.strip() for part in raw.split(",") if part.strip()]
+
+    @field_validator("allow_origins", "allowed_hosts", mode="before")
+    @classmethod
+    def _parse_comma_or_json_list(cls, value: Any) -> List[str]:
+        return cls._parse_list_value(value)
+
+# Load configured env file early so its values (like MCSD_DEBUG_DUMP_DIR) are applied consistently.
+try:
+    from dotenv import dotenv_values, load_dotenv
+    _dotenv_path = _ENV_FILE_PATH
+    _is_prod_raw = os.getenv("MCSD_IS_PRODUCTION")
+    if _is_prod_raw is None and _dotenv_path.exists():
+        try:
+            _is_prod_raw = (dotenv_values(str(_dotenv_path)).get("MCSD_IS_PRODUCTION") or "")
+        except Exception:
+            _is_prod_raw = ""
+    _is_prod = str(_is_prod_raw or "").strip().lower() in ("1", "true", "yes", "on")
+    if _dotenv_path.exists():
+        load_dotenv(dotenv_path=str(_dotenv_path), override=not _is_prod)
+        logger.info("[mCSD] env loaded file=%s override=%s", str(_dotenv_path), "on" if (not _is_prod) else "off")
+    else:
+        logger.info("[mCSD] env file not found file=%s", str(_dotenv_path))
+except Exception:
+    logger.exception("[mCSD] env load failed")
+settings = Settings()
 def _audit_hash(value: str | None) -> str | None:
     secret = (settings.audit_hmac_key or "").encode("utf-8")
     raw = (value or "").strip()
@@ -164,7 +239,7 @@ logger.setLevel(settings.log_level.upper())
 
 async def on_startup():
     _setup_file_logging()
-    logger.info("[mCSD] pydantic env_file=%s", str((Path(__file__).parent / ".env").resolve()))
+    logger.info("[mCSD] pydantic env_file=%s", str(_ENV_FILE_PATH))
     logger.info(
         "[mCSD] base=%s timeout=%ss auth=%s",
         settings.base_url,
@@ -179,19 +254,23 @@ async def on_startup():
         except Exception:
             logger.exception("[mCSD] debug dump JSON=on but cannot create dir=%s", str(out_dir))
     if settings.is_production:
-        if ALLOW_ORIGINS == ["*"]:
+        if settings.allow_origins == ["*"]:
             raise RuntimeError("MCSD_ALLOW_ORIGINS staat op '*' in productie; stel expliciete origins in.")
-        if ALLOWED_HOSTS == ["*"]:
+        if settings.allowed_hosts == ["*"]:
             raise RuntimeError("MCSD_ALLOWED_HOSTS staat op '*' in productie; stel expliciete hosts in.")
         if not settings.verify_tls:
             raise RuntimeError("MCSD_VERIFY_TLS staat uit in productie; dit is onveilig.")
 
     # PoC 9: valideer BgZ templates (fail fast) om runtime KeyErrors te voorkomen.
-    try:
-        _validate_notification_task_template()
-        _validate_workflow_task_template()
-    except Exception as exc:
-        raise RuntimeError(f"BgZ template validatie faalde: {exc}")
+    if settings.notifiedpull_enabled:
+        try:
+            _validate_notification_task_template()
+            _validate_workflow_task_template()
+        except Exception as exc:
+            raise RuntimeError(f"BgZ template validatie faalde: {exc}")
+
+
+
 
 
 async def _httpx_log_request(request: httpx.Request):
@@ -283,6 +362,585 @@ class ErrorResponse(BaseModel):
     details: Optional[Dict[str, Any]] = None
 
 
+OPENAPI_TAGS = [
+    {"name": "Health", "description": "Technische liveness/readiness endpoint(s) van de proxy zelf."},
+    {"name": "PoC 14 - Frontend", "description": "Meegeleverde HTML-zoekpagina voor mailbox-lookup in het mCSD-adresboek."},
+    {"name": "PoC 14 - Raw FHIR", "description": "Pass-through en helper-endpoints bovenop het upstream mCSD/ITI-90 adresboek."},
+    {"name": "PoC 14 - Addressbook", "description": "Flattened zoek-endpoints voor organisaties, locaties en zorgverleners."},
+    {"name": "PoC 9 - MSZ", "description": "MSZ-zoek- en capability-endpoints voor organisaties, organisatieonderdelen en technische endpoints."},
+    {"name": "PoC 9 - BgZ", "description": "BgZ notified-pull demo-endpoints: preflight, task preview, sample data laden en notificatie versturen."},
+]
+
+OPENAPI_DESCRIPTION = """
+FastAPI-proxy voor twee onafhankelijke flows:
+
+- **PoC 14**: mCSD-adresboek voor organisaties, locaties, zorgverleners en mailbox lookup.
+- **PoC 9**: MSZ/BgZ notified pull, inclusief organisatieonderdelen, technische endpoints, capability mapping, preflight, task preview en notify.
+
+Algemene kenmerken:
+
+- upstream FHIR/mCSD calls gaan naar `MCSD_BASE`
+- protected endpoints gebruiken optioneel `X-API-Key`
+- foutresponses worden genormaliseerd naar `reason`, `message`, `request_id`
+- `/health` controleert alleen de proxy zelf en niet de upstream server
+"""
+
+OPENAPI_COMMON_ERROR_RESPONSES = {
+    400: {"model": ErrorResponse, "description": "Ongeldige request, parameter of cursor."},
+    401: {"model": ErrorResponse, "description": "API key ontbreekt of is ongeldig."},
+    422: {"model": ErrorResponse, "description": "Request validatie mislukt."},
+    500: {"model": ErrorResponse, "description": "Interne serverfout."},
+    502: {"model": ErrorResponse, "description": "Upstream mCSD/FHIR server is niet bereikbaar of gaf een fout terug."},
+}
+
+OPENAPI_BGZ_ERROR_RESPONSES = {
+    **OPENAPI_COMMON_ERROR_RESPONSES,
+    503: {"model": ErrorResponse, "description": "BgZ Notified Pull functionaliteit is uitgeschakeld."},
+}
+
+OPENAPI_BGZ_SEND_ERROR_RESPONSES = {
+    **OPENAPI_BGZ_ERROR_RESPONSES,
+    409: {"model": ErrorResponse, "description": "De gekozen notification-endpointselectie is verouderd of gewijzigd."},
+}
+
+OPENAPI_REQUEST_ID_EXAMPLE = "req-2f4c3b1a9e6c4f7b"
+
+X_REQUEST_ID_PARAMETER_COMPONENT = {
+    "name": "X-Request-ID",
+    "in": "header",
+    "required": False,
+    "description": (
+        "Optionele correlatie-id voor tracing en loganalyse. "
+        "Als deze header ontbreekt, genereert de server zelf een request-id en stuurt die terug in de response."
+    ),
+    "schema": {
+        "type": "string",
+        "example": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+}
+
+X_REQUEST_ID_RESPONSE_HEADER_COMPONENT = {
+    "description": (
+        "Correlatie-id van de afgehandelde request. "
+        "Dit is de aangeleverde `X-Request-ID` of een server-gegenereerde waarde."
+    ),
+    "schema": {
+        "type": "string",
+        "example": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+}
+
+
+def _openapi_json_example(example: Any) -> Dict[str, Any]:
+    return {"content": {"application/json": {"example": example}}}
+
+
+def _openapi_html_example(example: str) -> Dict[str, Any]:
+    return {"content": {"text/html": {"example": example}}}
+
+
+OPENAPI_EXAMPLE_NOTIFICATION_ENDPOINT = {
+    "id": "789",
+    "address": "https://receiver.example/fhir/Task",
+    "status": "active",
+    "connectionType": {
+        "system": "http://hl7.org/fhir/endpoint-connection-type",
+        "code": "hl7-fhir-rest",
+        "display": "HL7 FHIR REST",
+    },
+    "payloadType": [
+        {
+            "system": "http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities",
+            "code": "Twiin-TA-notification",
+            "display": "Twiin TA notificatie",
+        }
+    ],
+    "payloadMimeType": ["application/fhir+json"],
+    "header": [],
+}
+
+OPENAPI_EXAMPLE_BGZ_FHIR_ENDPOINT = {
+    "id": "790",
+    "address": "https://receiver.example/fhir",
+    "status": "active",
+    "connectionType": {
+        "system": "http://hl7.org/fhir/endpoint-connection-type",
+        "code": "hl7-fhir-rest",
+        "display": "HL7 FHIR REST",
+    },
+    "payloadType": [
+        {
+            "system": "http://hl7.org/fhir/endpoint-payload-type",
+            "code": "http://nictiz.nl/fhir/CapabilityStatement/bgz2017-servercapabilities",
+            "display": "BgZ FHIR server",
+        }
+    ],
+    "payloadMimeType": ["application/fhir+json"],
+    "header": [],
+}
+
+OPENAPI_EXAMPLE_CAPABILITY_MAPPING_RESPONSE = {
+    "target": {
+        "reference": "HealthcareService/123",
+        "display": "Poli Cardiologie",
+    },
+    "organization": {
+        "reference": "Organization/456",
+        "display": "Ziekenhuis Oost",
+        "identifier": [
+            {
+                "system": "http://fhir.nl/fhir/NamingSystem/ura",
+                "value": "87654321",
+            }
+        ],
+    },
+    "decision": "C",
+    "decision_explanation": "Vereiste capabilities zijn gevonden door target + organisatie te combineren (per capability: target → organisatie).",
+    "supported": True,
+    "missing": [],
+    "notification": {
+        "address": "https://receiver.example/fhir/Task",
+        "base": "https://receiver.example/fhir",
+        "endpoint_id": "789",
+        "valid_http_base": True,
+        "source": "organization",
+    },
+    "bgz_fhir_server": {
+        "address": "https://receiver.example/fhir",
+        "base": "https://receiver.example/fhir",
+        "endpoint_id": "790",
+        "valid_http_base": True,
+        "source": "target",
+    },
+    "mapping": {
+        "twiin_ta_notification": {
+            "label": "Twiin TA notificatie",
+            "code": "Twiin-TA-notification",
+            "tokens": ["Twiin-TA-notification", "twiin-ta-notification"],
+            "required": True,
+            "candidates": {
+                "target_count": 0,
+                "organization_count": 1,
+                "target": [],
+                "organization": [
+                    {
+                        **OPENAPI_EXAMPLE_NOTIFICATION_ENDPOINT,
+                        "source": "organization",
+                        "sourceRef": "Organization/456",
+                    }
+                ],
+            },
+            "chosen": {
+                **OPENAPI_EXAMPLE_NOTIFICATION_ENDPOINT,
+                "source": "organization",
+                "sourceRef": "Organization/456",
+            },
+        },
+        "bgz_fhir_server": {
+            "label": "BgZ FHIR server",
+            "code": "http://nictiz.nl/fhir/CapabilityStatement/bgz2017-servercapabilities",
+            "tokens": ["http://nictiz.nl/fhir/CapabilityStatement/bgz2017-servercapabilities"],
+            "required": False,
+            "candidates": {
+                "target_count": 1,
+                "organization_count": 0,
+                "target": [
+                    {
+                        **OPENAPI_EXAMPLE_BGZ_FHIR_ENDPOINT,
+                        "source": "target",
+                        "sourceRef": "HealthcareService/123",
+                    }
+                ],
+                "organization": [],
+            },
+            "chosen": {
+                **OPENAPI_EXAMPLE_BGZ_FHIR_ENDPOINT,
+                "source": "target",
+                "sourceRef": "HealthcareService/123",
+            },
+        },
+    },
+}
+
+OPENAPI_EXAMPLE_BGZ_PREVIEW_TASK = {
+    "resourceType": "Task",
+    "id": "notification-task-preview",
+    "status": "requested",
+    "intent": "order",
+    "description": "BgZ notified pull demo",
+    "focus": {"reference": "Task/workflow-task-123"},
+    "for": {"reference": "Patient/patient-demo", "display": "J.P. van der Berg"},
+    "owner": {"reference": "Organization/456", "display": "Ziekenhuis Oost"},
+    "extension": [
+        {
+            "url": "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-healthcareservice",
+            "valueReference": {
+                "reference": "HealthcareService/123",
+                "display": "Poli Cardiologie",
+            },
+        }
+    ],
+    "requester": {
+        "agent": {
+            "reference": "Organization/organization-sender",
+            "display": "Ziekenhuis West",
+        }
+    },
+    "input": [
+        {
+            "type": {"text": "authorizationBase"},
+            "valueString": "M2Q0ZDU2NzgtYWJjZA==",
+        }
+    ],
+}
+
+OPENAPI_SUCCESS_RESPONSE_EXAMPLES = {
+    ("GET", "/mscd_zoek/"): _openapi_html_example(
+        "<!doctype html><html><head><title>mCSD zoek</title></head><body><form id=\"mailbox-search\"></form></body></html>"
+    ),
+    ("GET", "/health"): _openapi_json_example({"status": "ok"}),
+    ("GET", "/mcsd/search/{resource}"): _openapi_json_example(
+        {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": 1,
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "Organization",
+                        "id": "456",
+                        "name": "Ziekenhuis Oost",
+                    }
+                }
+            ],
+        }
+    ),
+    ("GET", "/addressbook/find-practitionerrole"): _openapi_json_example(
+        {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": 1,
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "PractitionerRole",
+                        "id": "pr-1",
+                        "practitioner": {"reference": "Practitioner/123"},
+                        "organization": {"reference": "Organization/456"},
+                        "specialty": [{"text": "Cardiologie"}],
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "Practitioner",
+                        "id": "123",
+                        "name": [{"text": "Dr. J. de Vries"}],
+                    }
+                },
+            ],
+        }
+    ),
+    ("GET", "/addressbook/search"): _openapi_json_example(
+        {
+            "total": 1,
+            "rows": [
+                {
+                    "practitioner_id": "123",
+                    "practitioner_name": "Dr. J. de Vries",
+                    "organization_id": "456",
+                    "organization_name": "Ziekenhuis Oost",
+                    "role": "Cardioloog",
+                    "specialty": "Cardiologie",
+                    "city": "Utrecht",
+                    "postal": "3511AA",
+                    "address": "Laan 1, Utrecht",
+                    "phone": "0301234567",
+                    "email": "cardiologie@ziekenhuis-oost.nl",
+                    "service_name": "Poli Cardiologie",
+                    "service_type": "cardiology",
+                    "service_contact": "0301234567",
+                    "service_org_name": "Ziekenhuis Oost",
+                    "affiliation_primary_org": "",
+                    "affiliation_primary_org_name": "",
+                    "affiliation_participating_org": "",
+                    "affiliation_participating_org_name": "",
+                    "affiliation_role": "",
+                }
+            ],
+        }
+    ),
+    ("GET", "/addressbook/organization"): _openapi_json_example(
+        {
+            "count": 1,
+            "items": [
+                {
+                    "resourceType": "Organization",
+                    "id": "456",
+                    "name": "Ziekenhuis Oost",
+                    "email": "cardiologie@ziekenhuis-oost.nl",
+                    "source": "organization.endpoint",
+                }
+            ],
+        }
+    ),
+    ("GET", "/addressbook/location"): _openapi_json_example(
+        {
+            "count": 1,
+            "items": [
+                {
+                    "resourceType": "Location",
+                    "id": "loc-12",
+                    "name": "Poli Cardiologie",
+                    "email": "cardiologie@ziekenhuis-oost.nl",
+                    "source": "organization.telecom",
+                    "organizationId": "456",
+                    "organizationName": "Ziekenhuis Oost",
+                }
+            ],
+        }
+    ),
+    ("GET", "/poc9/msz/organizations"): _openapi_json_example(
+        {
+            "count": 1,
+            "items": [
+                {
+                    "resourceType": "Organization",
+                    "id": "456",
+                    "name": "Ziekenhuis Oost",
+                    "identifier": [
+                        {
+                            "system": "http://fhir.nl/fhir/NamingSystem/ura",
+                            "value": "87654321",
+                        }
+                    ],
+                    "type": [
+                        {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                                    "code": "prov",
+                                    "display": "Healthcare Provider",
+                                }
+                            ]
+                        }
+                    ],
+                    "endpoints": [OPENAPI_EXAMPLE_NOTIFICATION_ENDPOINT],
+                }
+            ],
+            "next": "eyJuZXh0IjoiaHR0cHM6Ly9leGFtcGxlLm9yZy9maGlyL09yZ2FuaXphdGlvbj9wYWdlPTIifQ==",
+            "total": 42,
+        }
+    ),
+    ("GET", "/poc9/msz/orgunits"): _openapi_json_example(
+        {
+            "count": 1,
+            "items": [
+                {
+                    "resourceType": "HealthcareService",
+                    "id": "123",
+                    "name": "Poli Cardiologie",
+                    "organization": "Organization/456",
+                    "specialty": [{"text": "Cardiologie"}],
+                    "endpoints": [OPENAPI_EXAMPLE_NOTIFICATION_ENDPOINT],
+                }
+            ],
+            "next": None,
+            "total": 1,
+        }
+    ),
+    ("GET", "/poc9/msz/endpoints"): _openapi_json_example(
+        {
+            "count": 1,
+            "items": [OPENAPI_EXAMPLE_NOTIFICATION_ENDPOINT],
+            "next": None,
+            "total": 1,
+        }
+    ),
+    ("GET", "/poc9/msz/capability-mapping"): _openapi_json_example(OPENAPI_EXAMPLE_CAPABILITY_MAPPING_RESPONSE),
+    ("POST", "/bgz/load-data"): _openapi_json_example(
+        {
+            "success": True,
+            "target": "https://sender.example/fhir",
+            "resources_created": 2,
+            "details": [
+                {"resource": "Patient/patient-demo", "status": 200},
+                {"resource": "Organization/organization-sender", "status": 200},
+            ],
+        }
+    ),
+    ("POST", "/bgz/preflight"): _openapi_json_example(
+        {
+            **OPENAPI_EXAMPLE_CAPABILITY_MAPPING_RESPONSE,
+            "task_routing": {
+                "target_type": "HealthcareService",
+                "owner_ref": "Organization/456",
+                "owner_display": "Ziekenhuis Oost",
+                "location_ref": None,
+                "location_display": None,
+                "extension_location_ref": None,
+                "extension_location_display": None,
+                "extension_healthcareservice_ref": "HealthcareService/123",
+                "extension_healthcareservice_display": "Poli Cardiologie",
+            },
+            "resolved_receiver_base": "https://receiver.example/fhir",
+            "resolved_receiver_ura": "87654321",
+            "notification_endpoint_id": "789",
+            "frontend_endpoint_id_match": True,
+            "receiver_probe": {
+                "attempted": True,
+                "ok": True,
+                "reachable": True,
+                "http_status": 200,
+                "task_create_supported": True,
+                "reason": None,
+                "message": None,
+                "url": "https://receiver.example/fhir/metadata",
+            },
+            "ready_to_send": True,
+        }
+    ),
+    ("POST", "/bgz/task-preview"): _openapi_json_example(
+        {
+            "success": True,
+            "task": OPENAPI_EXAMPLE_BGZ_PREVIEW_TASK,
+            "sender_bgz_base": "https://sender.example/fhir",
+            "resolved_receiver_base": "https://receiver.example/fhir",
+            "notification_endpoint_id": "789",
+            "workflow_task_id": "workflow-task-123",
+        }
+    ),
+    ("POST", "/bgz/notify"): _openapi_json_example(
+        {
+            "success": True,
+            "target": "https://receiver.example/fhir/Task",
+            "task_id": "receiver-task-456",
+            "task_status": "requested",
+            "group_identifier": "notif-20260303-1234",
+            "sender_bgz_base": "https://sender.example/fhir",
+            "resolved_receiver_base": "https://receiver.example/fhir",
+            "workflow_task_id": "workflow-task-123",
+        }
+    ),
+}
+
+OPENAPI_ERROR_RESPONSE_EXAMPLES = {
+    "400": {
+        "reason": "bad_request",
+        "message": "Ongeldige request of parameter.",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+    "401": {
+        "reason": "unauthorized",
+        "message": "Ongeldige API key.",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+    "403": {
+        "reason": "forbidden",
+        "message": "task-preview is niet toegestaan in productie.",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+    "404": {
+        "reason": "not_found",
+        "message": "HTML page not found: mcsd_zoek.html",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+    "409": {
+        "reason": "conflict",
+        "message": "De gekozen notification-endpointselectie is verouderd of gewijzigd.",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+    "422": {
+        "reason": "validation_error",
+        "message": "Request validatie mislukt.",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+    "500": {
+        "reason": "internal_error",
+        "message": "Interne serverfout. Neem contact op met de beheerder.",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+    "502": {
+        "reason": "bad_gateway",
+        "message": "Upstream mCSD/FHIR server is niet bereikbaar of gaf een fout terug.",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+    "503": {
+        "reason": "notifiedpull_disabled",
+        "message": "BgZ Notified Pull functionaliteit is uitgeschakeld op deze server (MCSD_NOTIFIEDPULL_ENABLED=false).",
+        "request_id": OPENAPI_REQUEST_ID_EXAMPLE,
+    },
+}
+
+
+class HealthResponseModel(BaseModel):
+    status: Literal["ok"] = "ok"
+
+
+class FHIRBundleModel(BaseModel):
+    resourceType: str = "Bundle"
+    type: Optional[str] = None
+    total: Optional[int] = None
+    link: List[Dict[str, Any]] = Field(default_factory=list)
+    entry: List[Dict[str, Any]] = Field(default_factory=list)
+    model_config = ConfigDict(extra="allow")
+
+
+class AddressbookSearchRowModel(BaseModel):
+    practitioner_id: str = ""
+    practitioner_name: str = ""
+    organization_id: str = ""
+    organization_name: str = ""
+    role: str = ""
+    specialty: str = ""
+    city: str = ""
+    postal: str = ""
+    address: str = ""
+    phone: str = ""
+    email: str = ""
+    service_name: str = ""
+    service_type: str = ""
+    service_contact: str = ""
+    service_org_name: str = ""
+    affiliation_primary_org: str = ""
+    affiliation_primary_org_name: str = ""
+    affiliation_participating_org: str = ""
+    affiliation_participating_org_name: str = ""
+    affiliation_role: str = ""
+
+
+class AddressbookSearchResponseModel(BaseModel):
+    total: int
+    rows: List[AddressbookSearchRowModel] = Field(default_factory=list)
+
+
+class OrganizationMailboxSearchItemModel(BaseModel):
+    resourceType: Literal["Organization"] = "Organization"
+    id: str
+    name: Optional[str] = None
+    email: str
+    source: str
+
+
+class OrganizationMailboxSearchResponseModel(BaseModel):
+    count: int
+    items: List[OrganizationMailboxSearchItemModel] = Field(default_factory=list)
+
+
+class MailboxSearchItemModel(BaseModel):
+    resourceType: str
+    id: str
+    name: Optional[str] = None
+    email: str
+    source: str
+    organizationId: Optional[str] = None
+    organizationName: Optional[str] = None
+
+
+class MailboxSearchResponseModel(BaseModel):
+    count: int
+    items: List[MailboxSearchItemModel] = Field(default_factory=list)
+
+
 def _default_reason_for_status(status_code: int) -> str:
     if status_code == 400:
         return "bad_request"
@@ -347,22 +1005,148 @@ def _make_error_payload(
         details=details,
     ).model_dump(exclude_none=True)
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    title="mCSD ITI-90 Address Book Proxy",
+    summary="FastAPI-proxy voor PoC 14 (adresboek) en PoC 9 (MSZ/BgZ notified pull).",
+    description=OPENAPI_DESCRIPTION,
+    openapi_tags=OPENAPI_TAGS,
+)
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        summary=app.summary,
+        description=app.description,
+        routes=app.routes,
+        webhooks=app.webhooks.routes,
+        tags=app.openapi_tags,
+        servers=app.servers,
+        terms_of_service=app.terms_of_service,
+        contact=app.contact,
+        license_info=app.license_info,
+        separate_input_output_schemas=app.separate_input_output_schemas,
+    )
+
+    components = openapi_schema.setdefault("components", {})
+    component_parameters = components.setdefault("parameters", {})
+    component_headers = components.setdefault("headers", {})
+    component_parameters["XRequestIdHeader"] = X_REQUEST_ID_PARAMETER_COMPONENT
+    component_headers["XRequestIdHeader"] = X_REQUEST_ID_RESPONSE_HEADER_COMPONENT
+
+    http_methods = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
+
+    for path, path_item in (openapi_schema.get("paths") or {}).items():
+        if not isinstance(path_item, dict):
+            continue
+
+        for method_name, operation in path_item.items():
+            if method_name not in http_methods or not isinstance(operation, dict):
+                continue
+
+            parameters = operation.setdefault("parameters", [])
+            has_request_id_header = False
+
+            for parameter in parameters:
+                if not isinstance(parameter, dict):
+                    continue
+                if parameter.get("$ref") == "#/components/parameters/XRequestIdHeader":
+                    has_request_id_header = True
+                    break
+                if parameter.get("in") == "header" and parameter.get("name") == "X-Request-ID":
+                    has_request_id_header = True
+                    break
+
+            if not has_request_id_header:
+                parameters.append({"$ref": "#/components/parameters/XRequestIdHeader"})
+
+            responses = operation.get("responses") or {}
+
+            for response in responses.values():
+                if not isinstance(response, dict):
+                    continue
+                response_headers = response.setdefault("headers", {})
+                if "X-Request-ID" not in response_headers:
+                    response_headers["X-Request-ID"] = {"$ref": "#/components/headers/XRequestIdHeader"}
+
+            success_example = OPENAPI_SUCCESS_RESPONSE_EXAMPLES.get((method_name.upper(), path))
+            if success_example:
+                response_200 = responses.get("200")
+                if isinstance(response_200, dict):
+                    response_content = response_200.setdefault("content", {})
+                    for content_type, content_details in (success_example.get("content") or {}).items():
+                        content_entry = response_content.setdefault(content_type, {})
+                        if "examples" in content_entry or "example" in content_entry:
+                            continue
+                        if "examples" in content_details:
+                            content_entry["examples"] = content_details["examples"]
+                        elif "example" in content_details:
+                            content_entry["example"] = content_details["example"]
+
+            for status_code, example in OPENAPI_ERROR_RESPONSE_EXAMPLES.items():
+                response = responses.get(status_code)
+                if not isinstance(response, dict):
+                    continue
+                response_content = response.setdefault("content", {})
+                content_entry = response_content.setdefault("application/json", {})
+                if "examples" in content_entry or "example" in content_entry:
+                    continue
+                content_entry["example"] = example
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
+
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=ALLOWED_HOSTS,
+    allowed_hosts=settings.allowed_hosts,
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
+    allow_origins=settings.allow_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.add_middleware(RequestIdMiddleware)
 
-@app.get("/", include_in_schema=False)
-async def index():
-    return FileResponse(Path(__file__).parent / "mcsd_zoek_PoC_9.html")
+
+def _serve_html_page(path: Path) -> FileResponse:
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"HTML page not found: {path.name}")
+    return FileResponse(path, media_type="text/html; charset=utf-8")
+
+
+@app.get(
+    "/mscd_zoek/",
+    response_class=FileResponse,
+    tags=["PoC 14 - Frontend"],
+    summary="Lever de standalone mailbox-zoekpagina",
+    description=(
+        "Levert de meegeleverde HTML-pagina `mcsd_zoek.html` terug. "
+        "Deze pagina gebruikt `/addressbook/organization` en `/addressbook/location` "
+        "om functionele mailboxen op te zoeken in het mCSD-adresboek."
+    ),
+    response_description="HTML zoekpagina voor mailbox-lookup.",
+    responses={
+        200: {"description": "HTML frontendpagina.", "content": {"text/html": {}}},
+        404: {"model": ErrorResponse, "description": "De HTML-pagina ontbreekt op disk."},
+    },
+)
+def mscd_zoek_page():
+    return _serve_html_page(APP_ROOT / "mcsd_zoek.html")
+
+
+@app.get("/mcsd_bgz_verwijzing/", response_class=FileResponse, include_in_schema=False)
+def mscd_zoek_page():
+    return _serve_html_page(APP_ROOT / "mcsd_bgz_verwijzing.html")
 
 
 @app.exception_handler(HTTPException)
@@ -414,12 +1198,37 @@ MCSDBASE = settings.base_url
 TIMEOUT = settings.upstream_timeout
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=TIMEOUT, write=TIMEOUT, pool=TIMEOUT)
 HTTPX_LIMITS = httpx.Limits(max_connections=settings.httpx_max_connections, max_keepalive_connections=settings.httpx_max_keepalive_connections)
-HTTPX_VERIFY = settings.ca_certs_file if settings.verify_tls and settings.ca_certs_file else settings.verify_tls
 
-def verify_api_key(x_api_key: str | None = Header(default=None)):
+
+def _build_httpx_verify() -> bool | ssl.SSLContext:
+    if not settings.verify_tls:
+        return False
+    if settings.ca_certs_file:
+        return ssl.create_default_context(cafile=settings.ca_certs_file)
+    return True
+
+
+HTTPX_VERIFY = _build_httpx_verify()
+
+def verify_api_key(
+    x_api_key: str | None = Header(
+        default=None,
+        alias="X-API-Key",
+        description="Optionele API key. Vereist op alle beschermde endpoints als `MCSD_API_KEY` op de server is ingesteld.",
+    )
+):
     if settings.api_key and x_api_key != settings.api_key:
         raise HTTPException(status_code=401, detail="Ongeldige API key.")
 
+def verify_notifiedpull_enabled():
+    if not settings.notifiedpull_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "reason": "notifiedpull_disabled",
+                "message": "BgZ Notified Pull functionaliteit is uitgeschakeld op deze server (MCSD_NOTIFIEDPULL_ENABLED=false).",
+            },
+        )
 # Whitelist aligned with ITI-90 (commonly used parameters per resource)
 ALLOWED_PARAMS = {
     "Practitioner": {"active", "identifier", "name", "given", "family"},
@@ -920,7 +1729,17 @@ def _http_status_to_http_exception(e: httpx.HTTPStatusError) -> HTTPException:
         payload = {"reason": "upstream_http_error", "status_code": status_code}
     return HTTPException(status_code=status_code, detail=payload)
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["Health"],
+    response_model=HealthResponseModel,
+    summary="Controleer of de proxy draait",
+    description=(
+        "Eenvoudige liveness/readiness-check voor de FastAPI-proxy zelf. "
+        "Dit endpoint controleert **niet** of `MCSD_BASE` of een andere upstream FHIR-server bereikbaar is."
+    ),
+    response_description="Proxy draait en kan requests aannemen.",
+)
 def health():
     """
     Simple readiness/liveness endpoint.
@@ -929,8 +1748,26 @@ def health():
     """
     return {"status": "ok"}
 
-@app.get("/mcsd/search/{resource}", dependencies=[Depends(verify_api_key)])
-async def mcsd_search(resource: str, request: Request):
+@app.get(
+    "/mcsd/search/{resource}",
+    dependencies=[Depends(verify_api_key)],
+    tags=["PoC 14 - Raw FHIR"],
+    summary="Voer een allow-listed FHIR search door naar de upstream directory",
+    description=(
+        "Pass-through FHIR search op `MCSD_BASE` met allow-list filtering per resource. "
+        "Alle query parameters uit de request worden gelezen, maar alleen toegestane zoekparameters "
+        "en `_count`, `_include`, `_revinclude` worden doorgestuurd. Het resultaat is de ruwe upstream FHIR Bundle."
+    ),
+    response_description="FHIR Bundle van de upstream mCSD/FHIR-server.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
+)
+async def mcsd_search(
+    request: Request,
+    resource: str = ApiPath(
+        ...,
+        description="FHIR resource type. Toegestaan: Practitioner, PractitionerRole, HealthcareService, Location, Organization, Endpoint, OrganizationAffiliation.",
+    ),
+):
     """
     Pass-through FHIR search with allow-list filtering.
     Accepts arbitrary query parameters and forwards only allowed ones.
@@ -966,10 +1803,24 @@ async def mcsd_search(resource: str, request: Request):
     except Exception as e:
         _raise_502_with_reason(e)
 
-@app.get("/addressbook/find-practitionerrole", dependencies=[Depends(verify_api_key)])
-async def find_practitionerrole(name: str = Query(..., description="Search by practitioner name (string)", max_length=64),
-                                organization: str | None = Query(None, max_length=128),
-                                specialty: str | None = Query(None, max_length=128)):
+@app.get(
+    "/addressbook/find-practitionerrole",
+    dependencies=[Depends(verify_api_key)],
+    tags=["PoC 9 - MSZ"],
+    summary="Zoek PractitionerRole op basis van een practitioner-naam",
+    description=(
+        "Helper-endpoint dat eerst `Practitioner?name=...` uitvoert en daarna "
+        "`PractitionerRole` ophaalt voor de gevonden practitioners. Optionele filters op "
+        "organisatie en specialisme worden aan de tweede zoekstap toegevoegd."
+    ),
+    response_description="FHIR Bundle met PractitionerRole-resultaten en `_include`-resources.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
+)
+async def find_practitionerrole(
+    name: str = Query(..., description="Naamzoekterm voor `Practitioner.name`.", max_length=64),
+    organization: str | None = Query(None, description="Optionele organisatiefilter, bijvoorbeeld `Organization/123`.", max_length=128),
+    specialty: str | None = Query(None, description="Optionele specialismefilter zoals de upstream server die ondersteunt.", max_length=128),
+):
     # Convenience endpoint; keep logic minimal
     try:
         client = app.state.http_client
@@ -1010,19 +1861,32 @@ def _validate_near(near: str):
     if unit not in {"km", "m", "cm", "mm", "mi", "yd", "ft", "in"}:
         raise HTTPException(status_code=400, detail="Ongeldig 'near' formaat.")
 
-@app.get("/addressbook/search", dependencies=[Depends(verify_api_key)])
+@app.get(
+    "/addressbook/search",
+    dependencies=[Depends(verify_api_key)],
+    tags=["PoC 14 - Addressbook"],
+    response_model=AddressbookSearchResponseModel,
+    summary="Zoek en flatten Practitioner + PractitionerRole resultaten",
+    description=(
+        "Zoekt eerst Practitioners, daarna PractitionerRole en verrijkt best-effort met "
+        "`HealthcareService` en `OrganizationAffiliation`. Accepteert ook chained-style aliases "
+        "zoals `practitioner.name`, `organization.name:contains`, `location.near` en `location.near-distance`."
+    ),
+    response_description="Flattened rows voor frontend of VBA-client.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
+)
 async def addressbook_search(
-    name: str | None = Query(None, description="Free-text Practitioner name", max_length=64),
-    family: str | None = Query(None, max_length=64),
-    given: str | None = Query(None, max_length=64),
-    organization: str | None = Query(None, description="e.g., Organization/123 or via org_name", max_length=128),
-    org_name: str | None = Query(None, max_length=128),
-    specialty: str | None = Query(None, max_length=128),
-    city: str | None = Query(None, max_length=64),
-    postal: str | None = Query(None, max_length=16),
-    near: str | None = Query(None, description="lat|lng|distance|units (FHIR near)", max_length=64),
-    limit: int = Query(200, ge=1, le=2000),
-    mode: str = Query("fast", description="Result breadth: 'fast' (default) or 'full'", max_length=8),
+    name: str | None = Query(None, description="Vrije tekst op `Practitioner.name`.", max_length=64),
+    family: str | None = Query(None, description="Exacte of upstream-afhankelijke match op `Practitioner.family`.", max_length=64),
+    given: str | None = Query(None, description="Exacte of upstream-afhankelijke match op `Practitioner.given`.", max_length=64),
+    organization: str | None = Query(None, description="Exacte organisatiereferentie, bijvoorbeeld `Organization/123`.", max_length=128),
+    org_name: str | None = Query(None, description="Client-side contains-match op organisatienaam.", max_length=128),
+    specialty: str | None = Query(None, description="Specialismefilter voor PractitionerRole.", max_length=128),
+    city: str | None = Query(None, description="Filter op locatie- of organisatieplaats.", max_length=64),
+    postal: str | None = Query(None, description="Filter op postcode van Location.address.", max_length=16),
+    near: str | None = Query(None, description="Geografische filter in FHIR-notatie `lat|lng|distance|unit`.", max_length=64),
+    limit: int = Query(200, ge=1, le=2000, description="Maximaal aantal flattened rows in de response."),
+    mode: str = Query("fast", description="`fast` beperkt upstream fetches; `full` volgt meer paging en verrijking.", max_length=8),
     *, request: Request
 ):
     """
@@ -1383,8 +2247,27 @@ async def addressbook_search(
     except Exception as e:
         _raise_502_with_reason(e)
 
-@app.get("/addressbook/organization", dependencies=[Depends(verify_api_key)])
-async def addressbook_search_organization(name: str | None = Query(None, description="Organization name (string)", max_length=128), active: bool = True, limit: int = 20, contains: bool = False, *, request: Request):
+@app.get(
+    "/addressbook/organization",
+    dependencies=[Depends(verify_api_key)],
+    tags=["PoC 14 - Addressbook"],
+    response_model=OrganizationMailboxSearchResponseModel,
+    summary="Zoek organisaties met functionele mailboxen",
+    description=(
+        "Zoekt `Organization` resources en retourneert e-mailadressen uit `Organization.telecom` "
+        "en, indien aanwezig, uit meegeleverde `Endpoint.address` waarden met `mailto:`."
+    ),
+    response_description="Lijst met functionele mailboxen per organisatie.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
+)
+async def addressbook_search_organization(
+    name: str | None = Query(None, description="Organisatienaam of zoekterm.", max_length=128),
+    active: bool = Query(True, description="Filter op actieve organisaties."),
+    limit: int = Query(20, description="Gewenst maximaal aantal organizations; intern afgekapt op 1..100."),
+    contains: bool = Query(False, description="Gebruik `name:contains` in plaats van `name`."),
+    *,
+    request: Request,
+):
     """
     Zoek organisaties met functionele mailboxen.
     - mCSD ITI-90: Organization?active=true&name=<...>&_include=Organization:endpoint
@@ -1450,8 +2333,26 @@ async def addressbook_search_organization(name: str | None = Query(None, descrip
     except Exception as e:
         _raise_502_with_reason(e)
 
-@app.get("/addressbook/location", dependencies=[Depends(verify_api_key)])
-async def addressbook_search_location(name: str | None = Query(None, description="Location name (string)", max_length=128), limit: int = 20, contains: bool = False, *, request: Request):
+@app.get(
+    "/addressbook/location",
+    dependencies=[Depends(verify_api_key)],
+    tags=["PoC 14 - Addressbook"],
+    response_model=MailboxSearchResponseModel,
+    summary="Zoek locaties en resolveer de mailbox van de gekoppelde organisatie",
+    description=(
+        "Zoekt `Location` resources en geeft mailboxen terug uit `Location.telecom`, "
+        "`Organization.telecom` en, als fallback, `Organization.endpoint` met `mailto:`."
+    ),
+    response_description="Lijst met mailboxen per locatie.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
+)
+async def addressbook_search_location(
+    name: str | None = Query(None, description="Locatienaam of zoekterm.", max_length=128),
+    limit: int = Query(20, description="Gewenst maximaal aantal locations; intern afgekapt op 1..100."),
+    contains: bool = Query(False, description="Gebruik `name:contains` in plaats van `name`."),
+    *,
+    request: Request,
+):
     """
     Zoek locaties en geef de functionele mailbox van de zorgverlener (organisatie) terug.
     - Primair: Location?name=<...>&_include=Location:organization (indien ondersteund)
@@ -1922,6 +2823,13 @@ class PagedOrgUnitsResponse(BaseModel):
     total: Optional[int] = None
 
 
+class PagedTechnicalEndpointsResponseModel(BaseModel):
+    count: int
+    items: List[TechnicalEndpointModel] = Field(default_factory=list)
+    next: Optional[str] = None
+    total: Optional[int] = None
+
+
 class CapabilityCandidatesModel(BaseModel):
     target_count: int = 0
     organization_count: int = 0
@@ -1980,18 +2888,71 @@ class BgzTaskPreviewResponseModel(BaseModel):
     workflow_task_id: Optional[str] = None
 
 
+class BgzLoadDataDetailModel(BaseModel):
+    resource: str
+    status: int
+
+
+class BgzLoadDataResponseModel(BaseModel):
+    success: bool
+    target: str
+    resources_created: int
+    details: List[BgzLoadDataDetailModel] = Field(default_factory=list)
+
+
+class TaskRoutingModel(BaseModel):
+    target_type: str
+    owner_ref: Optional[str] = None
+    owner_display: Optional[str] = None
+    location_ref: Optional[str] = None
+    location_display: Optional[str] = None
+    extension_location_ref: Optional[str] = None
+    extension_location_display: Optional[str] = None
+    extension_healthcareservice_ref: Optional[str] = None
+    extension_healthcareservice_display: Optional[str] = None
+
+
+class ReceiverProbeModel(BaseModel):
+    attempted: bool
+    ok: Optional[bool] = None
+    reachable: Optional[bool] = None
+    http_status: Optional[int] = None
+    task_create_supported: Optional[bool] = None
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    url: Optional[str] = None
+
+
+class BgzPreflightResponseModel(CapabilityMappingResponseModel):
+    task_routing: TaskRoutingModel
+    resolved_receiver_base: Optional[str] = None
+    resolved_receiver_ura: Optional[str] = None
+    notification_endpoint_id: Optional[str] = None
+    frontend_endpoint_id_match: Optional[bool] = None
+    receiver_probe: ReceiverProbeModel
+    ready_to_send: bool
+
+
 @app.get(
     "/poc9/msz/organizations",
     dependencies=[Depends(verify_api_key)],
+    tags=["PoC 9 - MSZ"],
     response_model=PagedOrganizationsResponse,
+    summary="Zoek MSZ-zorgorganisaties",
+    description=(
+        "Zoekt `Organization` resources in een gevuld MSZ-adresboek en include direct gekoppelde "
+        "technische `Endpoint` resources. Ondersteunt cursor-based paginering via `next` en `cursor`."
+    ),
+    response_description="Pagina met organisaties en hun technische endpoints.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
 )
 async def poc9_msz_organizations(
-    name: str | None = Query(None, max_length=128),
-    contains: bool = False,
-    identifier: str | None = Query(None, max_length=128),
-    org_type: str | None = Query(None, alias="type", max_length=128),
-    limit: int = Query(20, ge=1, le=200),
-    cursor: str | None = Query(None, max_length=4096),
+    name: str | None = Query(None, description="Zoekterm voor organisatienaam.", max_length=128),
+    contains: bool = Query(False, description="Gebruik `name:contains` in plaats van `name`."),
+    identifier: str | None = Query(None, description="FHIR token identifier voor Organization.identifier.", max_length=128),
+    org_type: str | None = Query(None, alias="type", description="FHIR token voor Organization.type.", max_length=128),
+    limit: int = Query(20, ge=1, le=200, description="Maximaal aantal organisaties per pagina."),
+    cursor: str | None = Query(None, description="Opaque cursor uit een eerdere response om de volgende pagina op te halen.", max_length=4096),
     *,
     request: Request,
 ):
@@ -2091,15 +3052,23 @@ async def poc9_msz_organizations(
 @app.get(
     "/poc9/msz/orgunits",
     dependencies=[Depends(verify_api_key)],
+    tags=["PoC 9 - MSZ"],
     response_model=PagedOrgUnitsResponse,
+    summary="Zoek organisatieonderdelen binnen een MSZ-organisatie",
+    description=(
+        "Zoekt `Location`, `HealthcareService` en/of sub-`Organization` resources binnen een geselecteerde organisatie. "
+        "Ondersteunt `kind=location|service|suborg|all` en cursor-based paginering."
+    ),
+    response_description="Pagina met organisatieonderdelen en hun technische endpoints.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
 )
 async def poc9_msz_orgunits(
-    organization: str | None = Query(None, max_length=128),
-    kind: str = Query("all", max_length=32),
-    name: str | None = Query(None, max_length=128),
-    contains: bool = False,
-    limit: int = 50,
-    cursor: str | None = Query(None, max_length=4096),
+    organization: str | None = Query(None, description="Parent organization reference, bijvoorbeeld `Organization/123`.", max_length=128),
+    kind: str = Query("all", description="Te zoeken onderdeeltype: `location`, `service`, `suborg` of `all`.", max_length=32),
+    name: str | None = Query(None, description="Zoekterm voor de naam van het onderdeel.", max_length=128),
+    contains: bool = Query(False, description="Gebruik `name:contains` in plaats van `name`."),
+    limit: int = Query(50, description="Gewenst maximaal aantal resources per upstream zoekstap."),
+    cursor: str | None = Query(None, description="Opaque cursor uit een eerdere response om de volgende pagina op te halen.", max_length=4096),
     *,
     request: Request,
 ):
@@ -2453,15 +3422,29 @@ async def poc9_msz_orgunits(
     return {"count": len(items), "items": items, "next": next_cursor, "total": total_out}
 
 
-@app.get("/poc9/msz/endpoints", dependencies=[Depends(verify_api_key)])
+@app.get(
+    "/poc9/msz/endpoints",
+    dependencies=[Depends(verify_api_key)],
+    tags=["PoC 9 - MSZ"],
+    response_model=PagedTechnicalEndpointsResponseModel,
+    response_model_exclude_unset=True,
+    summary="Haal technische endpoints op voor een geselecteerd target",
+    description=(
+        "Leest de `Endpoint` references van een `Location`, `HealthcareService` of `Organization` target "
+        "en ondersteunt optionele filtering op capability-achtige kenmerken zoals `connection-type`, "
+        "`payload-type`, `payload-mime-type` en de heuristische `endpoint_kind` filter."
+    ),
+    response_description="Pagina met technische Endpoint-informatie.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
+)
 async def poc9_msz_endpoints(
-    target: str | None = Query(None, max_length=256),
-    endpoint_kind: str | None = Query(None, max_length=32),
-    connection_type: str | None = Query(None, max_length=128),
-    payload_type: str | None = Query(None, max_length=256),
-    payload_mime_type: str | None = Query(None, max_length=128),
-    limit: int = Query(50, ge=1, le=200),
-    cursor: str | None = Query(None, max_length=4096),
+    target: str | None = Query(None, description="Target reference in de vorm `ResourceType/id`.", max_length=256),
+    endpoint_kind: str | None = Query(None, description="Heuristische filter zoals `fhir`, `notification` of `auth`.", max_length=32),
+    connection_type: str | None = Query(None, description="FHIR tokenfilter voor `Endpoint.connectionType`.", max_length=128),
+    payload_type: str | None = Query(None, description="FHIR tokenfilter voor `Endpoint.payloadType`.", max_length=256),
+    payload_mime_type: str | None = Query(None, description="Exacte MIME-typefilter voor `Endpoint.payloadMimeType`.", max_length=128),
+    limit: int = Query(50, ge=1, le=200, description="Maximaal aantal endpoints per pagina."),
+    cursor: str | None = Query(None, description="Opaque cursor uit een eerdere response om de volgende pagina op te halen.", max_length=4096),
 ):
     """
     PoC 8/9: haal technische endpoints op voor een organisatieonderdeel (Location/HealthcareService/Organization)
@@ -2753,15 +3736,25 @@ def _normalize_relative_ref(ref: Optional[str]) -> str:
 @app.get(
     "/poc9/msz/capability-mapping",
     dependencies=[Depends(verify_api_key)],
+    tags=["PoC 9 - MSZ"],
     response_model=CapabilityMappingResponseModel,
+    summary="Map capabilities naar technische endpoints via decision tree A-D",
+    description=(
+        "Bepaalt voor een geselecteerd target en optioneel een owning organization welke "
+        "technische endpoints gebruikt moeten worden voor PoC 9/BgZ notified pull. "
+        "De response bevat candidate lists, gekozen endpoints, missende capabilities en "
+        "genormaliseerde notification/BgZ base-URL's."
+    ),
+    response_description="Capability mapping inclusief gekozen endpoints en decision tree-uitkomst.",
+    responses=OPENAPI_COMMON_ERROR_RESPONSES,
 )
 async def poc9_msz_capability_mapping(
-    target: str = Query(..., max_length=256, description="Target resource reference (ResourceType/id)."),
+    target: str = Query(..., max_length=256, description="Target reference in de vorm `ResourceType/id`."),
     organization: str | None = Query(
-        None, max_length=256, description="Owning organization reference (Organization/id). Optional; if omitted, inferred where possible."
+        None, max_length=256, description="Owning organization reference in de vorm `Organization/id`. Indien leeg probeert de service dit af te leiden."
     ),
-    include_oauth: bool = Query(False, description="Include Nuts-OAuth in the response (optional capability)."),
-    limit: int = Query(200, ge=1, le=200, description="Max number of Endpoint resources to fetch per scope (target/org)."),
+    include_oauth: bool = Query(False, description="Neem de optionele Nuts-OAuth capability op in de response."),
+    limit: int = Query(200, ge=1, le=200, description="Maximaal aantal Endpoint resources dat per scope wordt opgehaald."),
 ):
     """Resolve endpoints for key capabilities using decision tree A-D.
 
@@ -3148,6 +4141,39 @@ Optional capabilities (informational / for other flows):
     }
 
 # --- BgZ Endpoints ---
+
+BGZ_PREFLIGHT_OPENAPI_EXAMPLES = {
+    "healthcare_service": {
+        "summary": "Preflight voor een afdeling of specialisme",
+        "description": "Controleer capability mapping, receiver-URA en optioneel de receiver `/metadata`.",
+        "value": {
+            "receiver_org_ref": "Organization/456",
+            "receiver_target_ref": "HealthcareService/123",
+            "receiver_notification_endpoint_id": "789",
+            "check_receiver": True,
+            "include_oauth": False,
+        },
+    },
+}
+
+BGZ_NOTIFY_OPENAPI_EXAMPLES = {
+    "healthcare_service": {
+        "summary": "Notification Task voor een afdeling",
+        "description": "Voorbeeldrequest voor task preview of notify naar een `HealthcareService` target.",
+        "value": {
+            "receiver_ura": "87654321",
+            "receiver_name": "Ziekenhuis Oost - Cardiologie",
+            "receiver_org_ref": "Organization/456",
+            "receiver_org_name": "Ziekenhuis Oost",
+            "receiver_target_ref": "HealthcareService/123",
+            "receiver_notification_endpoint_id": "789",
+            "patient_bsn": "172642863",
+            "patient_name": "J.P. van der Berg",
+            "description": "BgZ notified pull demo",
+            "workflow_task_id": "workflow-task-123",
+        },
+    },
+}
 
 class BgzNotifyRequest(BaseModel):
     receiver_ura: str = Field(..., max_length=64, description="Receiver organization URA")
@@ -3808,8 +4834,6 @@ def _determine_task_routing(
         task_owner_ref = effective_org_ref_norm or receiver_org_ref_norm or None
         task_owner_display = effective_org_name
     return task_owner_ref, task_owner_display, task_location_ref, task_location_display
-
-
 def _build_bgz_notification_task(
     *,
     sender_ura: str,
@@ -4184,10 +5208,22 @@ async def _upsert_workflow_task_to_sender_bgz(
                 },
             },
         )
-@app.post("/bgz/load-data", dependencies=[Depends(verify_api_key)])
+@app.post(
+    "/bgz/load-data",
+    dependencies=[Depends(verify_api_key), Depends(verify_notifiedpull_enabled)],
+    tags=["PoC 9 - BgZ"],
+    response_model=BgzLoadDataResponseModel,
+    summary="Laad BgZ demo-data in een doel-FHIR server",
+    description=(
+        "Laadt de meegeleverde BgZ sample bundle in een doel-FHIR server door per resource een "
+        "`PUT {ResourceType}/{id}` uit te voeren. Bedoeld voor demo- en testdoeleinden."
+    ),
+    response_description="Overzicht van de aangemaakte of bijgewerkte demo-resources.",
+    responses=OPENAPI_BGZ_ERROR_RESPONSES,
+)
 async def bgz_load_data(
-    hapi_base: str = Query(..., description="Target HAPI FHIR server base URL"),
-    sender_ura: str = Query(..., description="Sender organization URA"),
+    hapi_base: str = Query(..., description="Base-URL van de doel-HAPI/FHIR server."),
+    sender_ura: str = Query(..., description="URA die in de meegeleverde sample `Organization` wordt gezet."),
 ):
     """
     Load BgZ sample data (Patient, Conditions, Allergies, Medications, etc.)
@@ -4248,8 +5284,26 @@ class BgzPreflightRequest(BaseModel):
     include_oauth: bool = Field(False, description="(Debug/demo) Include OAuth/NUTS endpoints in the capability mapping response.")
 
 
-@app.post("/bgz/preflight", dependencies=[Depends(verify_api_key)])
-async def bgz_preflight(payload: BgzPreflightRequest = Body(...)):
+@app.post(
+    "/bgz/preflight",
+    dependencies=[Depends(verify_api_key), Depends(verify_notifiedpull_enabled)],
+    tags=["PoC 9 - BgZ"],
+    response_model=BgzPreflightResponseModel,
+    response_model_exclude_unset=True,
+    summary="Controleer of een BgZ notificatie verzendbaar is",
+    description=(
+        "Valideert de sender-config, resolveert via capability mapping het notification endpoint "
+        "en kan optioneel de receiver `/metadata` pingen om reachability en `Task.create` te controleren."
+    ),
+    response_description="Preflight-resultaat inclusief capability mapping, routing en receiver probe.",
+    responses=OPENAPI_BGZ_ERROR_RESPONSES,
+)
+async def bgz_preflight(
+    payload: BgzPreflightRequest = Body(
+        ...,
+        openapi_examples=BGZ_PREFLIGHT_OPENAPI_EXAMPLES,
+    )
+):
     """Preflight check before sending a BgZ notification Task.
 
     Doel: geef the frontend maximale zekerheid dat the backend *kan* verzenden:
@@ -4265,6 +5319,19 @@ async def bgz_preflight(payload: BgzPreflightRequest = Body(...)):
             detail={"reason": "misconfigured", "message": "MCSD_SENDER_URA en/of MCSD_SENDER_NAME is niet ingesteld."},
         )
 
+    sender_uzi_sys = (settings.sender_uzi_sys or "").strip()
+    sender_system_name = (settings.sender_system_name or "").strip()
+    if not sender_uzi_sys or not sender_system_name:
+        raise HTTPException(
+            status_code=500,
+            detail={"reason": "misconfigured", "message": "MCSD_SENDER_UZI_SYS en/of MCSD_SENDER_SYSTEM_NAME is niet ingesteld."},
+        )
+    sender_bgz_base_norm = _normalize_fhir_base(settings.sender_bgz_base or "")
+    if not sender_bgz_base_norm:
+        raise HTTPException(
+            status_code=500,
+            detail={"reason": "misconfigured", "message": "MCSD_SENDER_BGZ_BASE is niet ingesteld; dit is nodig om de Workflow Task te hosten."},
+        )
     receiver_org_ref = (payload.receiver_org_ref or "").strip() or None
     receiver_target_ref = (payload.receiver_target_ref or "").strip()
     receiver_notification_endpoint_id = (payload.receiver_notification_endpoint_id or "").strip() or None
@@ -4453,10 +5520,26 @@ async def bgz_preflight(payload: BgzPreflightRequest = Body(...)):
 
 @app.post(
     "/bgz/task-preview",
-    dependencies=[Depends(verify_api_key)],
+    dependencies=[Depends(verify_api_key), Depends(verify_notifiedpull_enabled)],
+    tags=["PoC 9 - BgZ"],
     response_model=BgzTaskPreviewResponseModel,
+    summary="Bouw een BgZ Notification Task zonder te verzenden",
+    description=(
+        "Genereert dezelfde notification Task als `/bgz/notify`, maar stuurt die niet naar de receiver. "
+        "Handig voor UI-preview, tests en troubleshooting."
+    ),
+    response_description="Gebouwde notification Task inclusief resolved receiver- en sender-metadata.",
+    responses={
+        **OPENAPI_BGZ_SEND_ERROR_RESPONSES,
+        403: {"model": ErrorResponse, "description": "Task preview is in productie uitgeschakeld."},
+    },
 )
-async def bgz_task_preview(payload: BgzNotifyRequest = Body(...)):
+async def bgz_task_preview(
+    payload: BgzNotifyRequest = Body(
+        ...,
+        openapi_examples=BGZ_NOTIFY_OPENAPI_EXAMPLES,
+    )
+):
     """Build a BgZ notification Task without sending it (for UI preview/tests)."""
     if settings.is_production and not settings.allow_task_preview_in_production:
         raise HTTPException(
@@ -4576,10 +5659,24 @@ async def bgz_task_preview(payload: BgzNotifyRequest = Body(...)):
 
 @app.post(
     "/bgz/notify",
-    dependencies=[Depends(verify_api_key)],
+    dependencies=[Depends(verify_api_key), Depends(verify_notifiedpull_enabled)],
+    tags=["PoC 9 - BgZ"],
     response_model=BgzNotifyResponseModel,
+    summary="Verstuur een BgZ Notification Task naar de receiver",
+    description=(
+        "Voert eerst capability mapping uit op basis van het gekozen receiver target, maakt daarna "
+        "een Workflow Task aan op de sender FHIR-server en post vervolgens de notification Task naar "
+        "het resolved receiver notification endpoint."
+    ),
+    response_description="Resultaat van het verzenden van de notification Task.",
+    responses=OPENAPI_BGZ_SEND_ERROR_RESPONSES,
 )
-async def bgz_notify(payload: BgzNotifyRequest = Body(...)):
+async def bgz_notify(
+    payload: BgzNotifyRequest = Body(
+        ...,
+        openapi_examples=BGZ_NOTIFY_OPENAPI_EXAMPLES,
+    )
+):
     """
     Send a BgZ notification Task to an external receiver's FHIR server.
 

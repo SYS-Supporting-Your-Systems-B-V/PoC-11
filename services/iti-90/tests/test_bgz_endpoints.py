@@ -1,5 +1,6 @@
 # tests/test_bgz_endpoints.py
 
+import base64
 import importlib
 import json
 import os
@@ -83,6 +84,8 @@ def assert_task_matches_notification_template(
     template: Dict[str, Any],
     sender_ura: str,
     sender_name: str,
+    sender_uzi_sys: str,
+    sender_system_name: str,
     sender_uzi_sys: str,
     sender_system_name: str,
     receiver_ura: str,
@@ -207,15 +210,32 @@ def assert_task_matches_notification_template(
     else:
         assert "description" not in task
 
-    # --- Dynamic Task.input entries ---
-    auth_input = _find_task_input(task, "authorization-base")
-    assert auth_input is not None, "authorization-base input ontbreekt"
-    assert isinstance(auth_input.get("valueString"), str) and auth_input["valueString"].strip()
-    assert auth_input["valueString"] != "DYNAMIC:authorization_base"
+    # --- Task.input ---
+    template_inputs = template.get("input") or []
+    task_inputs = task.get("input") or []
+    assert isinstance(task_inputs, list) and len(task_inputs) == len(template_inputs), "input-lijst wijkt af"
 
-    workflow_input = _find_task_input(task, "get-workflow-task")
-    assert workflow_input is not None, "get-workflow-task input ontbreekt"
-    assert workflow_input.get("valueBoolean") is True
+    def _task_input_by_code(inputs: List[Dict[str, Any]], code: str) -> Optional[Dict[str, Any]]:
+        for inp in inputs:
+            coding = (((inp or {}).get("type") or {}).get("coding") or [])
+            if not isinstance(coding, list):
+                continue
+            for c in coding:
+                if (c or {}).get("code") == code:
+                    return inp
+        return None
+
+    auth_input = _task_input_by_code(task_inputs, "authorization-base")
+    assert auth_input is not None, "input authorization-base ontbreekt"
+    auth_value = (auth_input or {}).get("valueString")
+    assert isinstance(auth_value, str) and auth_value.strip(), "authorization-base valueString ontbreekt"
+    assert auth_value != "DYNAMIC:authorization_base", "authorization-base placeholder is niet vervangen"
+    decoded = base64.b64decode(auth_value).decode()
+    uuid.UUID(decoded)
+
+    get_wf_input = _task_input_by_code(task_inputs, "get-workflow-task")
+    assert get_wf_input is not None, "input get-workflow-task ontbreekt"
+    assert get_wf_input.get("valueBoolean") is True
 
 
 @dataclass
@@ -281,10 +301,15 @@ class FakeHttpClient:
             return self._post_responses.pop(0)
         return self._next_post_response
 
-    async def get(self, url: str, *, headers: Optional[Dict[str, str]] = None, timeout: Optional[float] = None, params: Any = None):
-        self.get_calls.append({"url": url, "headers": headers or {}, "timeout": timeout, "params": params})
-        if self._get_responses:
-            return self._get_responses.pop(0)
+    async def get(
+        self,
+        url: str,
+        *,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ):
+        self.get_calls.append({"url": url, "headers": headers or {}, "timeout": timeout, "params": params or {}})
         return self._next_get_response
 
     async def aclose(self) -> None:
@@ -327,28 +352,51 @@ def _auth_headers(appmod) -> Dict[str, str]:
     return {"X-API-Key": str(appmod.settings.api_key)}
 
 
-def _find_task_extension(task: Dict[str, Any], url: str) -> Optional[Dict[str, Any]]:
-    for extension in task.get("extension") or []:
-        if isinstance(extension, dict) and extension.get("url") == url:
-            return extension
-    return None
-
-
-def _find_task_input(task: Dict[str, Any], code: str) -> Optional[Dict[str, Any]]:
-    for item in task.get("input") or []:
-        if not isinstance(item, dict):
-            continue
-        coding = ((item.get("type") or {}).get("coding") or [])
-        if any(isinstance(entry, dict) and entry.get("code") == code for entry in coding):
-            return item
-    return None
-
-
-def _find_task_identifier(task: Dict[str, Any], system: str) -> Optional[Dict[str, Any]]:
-    for identifier in task.get("identifier") or []:
-        if isinstance(identifier, dict) and identifier.get("system") == system:
-            return identifier
-    return None
+def _capability_mapping_stub(
+    *,
+    target: str,
+    notification_base: str = "https://receiver.example/fhir",
+    endpoint_id: str = "ep-1",
+    organization_ref: str = "Organization/org-owner",
+    organization_display: str = "Ziekenhuis Oost",
+) -> Dict[str, Any]:
+    endpoint = {
+        "id": endpoint_id,
+        "address": f"{notification_base}/Task",
+        "source": "target",
+        "sourceRef": target,
+    }
+    return {
+        "supported": True,
+        "missing": [],
+        "decision": "A",
+        "decision_explanation": "Teststub met geldige notification-capability.",
+        "notification": {
+            "address": endpoint["address"],
+            "base": notification_base,
+            "endpoint_id": endpoint_id,
+            "valid_http_base": True,
+            "source": "target",
+        },
+        "bgz_fhir_server": {},
+        "mapping": {
+            "twiin_ta_notification": {
+                "label": "Twiin TA notificatie",
+                "code": "Twiin-TA-notification",
+                "tokens": ["Twiin-TA-notification"],
+                "required": True,
+                "candidates": {
+                    "target_count": 1,
+                    "organization_count": 0,
+                    "target": [endpoint],
+                    "organization": [],
+                },
+                "chosen": endpoint,
+            }
+        },
+        "organization": {"reference": organization_ref, "display": organization_display},
+        "target": {"reference": target},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -394,14 +442,7 @@ def test_bgz_load_data_puts_all_resources_and_updates_sender_ura(appmod, client,
 
 def test_bgz_preflight_location_routing_and_metadata_probe_ok(appmod, client, monkeypatch):
     async def _fake_capability_mapping(*, target: str, organization: str | None, include_oauth: bool, limit: int):
-        return {
-            "supported": True,
-            "notification": {"base": "https://receiver.example/fhir", "endpoint_id": "ep-1"},
-            "mapping": {"twiin_ta_notification": {"chosen": {"id": "ep-1"}}},
-            # Preflight gebruikt deze om owner/location routing te tonen.
-            "organization": {"reference": "Organization/org-owner", "display": "Ziekenhuis Oost"},
-            "target": {"reference": target},
-        }
+        return _capability_mapping_stub(target=target)
 
     # Capability mapping stub
     monkeypatch.setattr(appmod, "poc9_msz_capability_mapping", _fake_capability_mapping)
@@ -410,21 +451,10 @@ def test_bgz_preflight_location_routing_and_metadata_probe_ok(appmod, client, mo
     fake.queue_get_response(
         DummyResponse(
             200,
-            {
-                "resourceType": "Organization",
+            {           
                 "identifier": [
-                    {
-                        "system": "http://fhir.nl/fhir/NamingSystem/ura",
-                        "value": "87654321",
-                    }
+                    {"system": "http://fhir.nl/fhir/NamingSystem/ura", "value": "87654321"},
                 ],
-            },
-        )
-    )
-    fake.queue_get_response(
-        DummyResponse(
-            200,
-            {
                 "resourceType": "CapabilityStatement",
                 "rest": [
                     {
@@ -474,13 +504,7 @@ def test_bgz_preflight_location_routing_and_metadata_probe_ok(appmod, client, mo
 
 def test_bgz_preflight_not_ready_when_metadata_has_no_task_create(appmod, client, monkeypatch):
     async def _fake_capability_mapping(*, target: str, organization: str | None, include_oauth: bool, limit: int):
-        return {
-            "supported": True,
-            "notification": {"base": "https://receiver.example/fhir", "endpoint_id": "ep-1"},
-            "mapping": {"twiin_ta_notification": {"chosen": {"id": "ep-1"}}},
-            "organization": {"reference": "Organization/org-owner", "display": "Ziekenhuis Oost"},
-            "target": {"reference": target},
-        }
+        return _capability_mapping_stub(target=target)
 
     monkeypatch.setattr(appmod, "poc9_msz_capability_mapping", _fake_capability_mapping)
 
@@ -504,6 +528,9 @@ def test_bgz_preflight_not_ready_when_metadata_has_no_task_create(appmod, client
         DummyResponse(
             200,
             {
+                "identifier": [
+                    {"system": "http://fhir.nl/fhir/NamingSystem/ura", "value": "87654321"},
+                ],
                 "resourceType": "CapabilityStatement",
                 "rest": [
                     {
@@ -538,13 +565,7 @@ def test_bgz_preflight_not_ready_when_metadata_has_no_task_create(appmod, client
 
 def test_bgz_preflight_healthcareservice_routing_owner_ref_only(appmod, client, monkeypatch):
     async def _fake_capability_mapping(*, target: str, organization: str | None, include_oauth: bool, limit: int):
-        return {
-            "supported": True,
-            "notification": {"base": "https://receiver.example/fhir", "endpoint_id": "ep-1"},
-            "mapping": {"twiin_ta_notification": {"chosen": {"id": "ep-1"}}},
-            "organization": {"reference": "Organization/org-owner", "display": "Ziekenhuis Oost"},
-            "target": {"reference": target},
-        }
+        return _capability_mapping_stub(target=target)
 
     monkeypatch.setattr(appmod, "poc9_msz_capability_mapping", _fake_capability_mapping)
 
@@ -553,17 +574,14 @@ def test_bgz_preflight_healthcareservice_routing_owner_ref_only(appmod, client, 
         DummyResponse(
             200,
             {
-                "resourceType": "Organization",
                 "identifier": [
-                    {
-                        "system": "http://fhir.nl/fhir/NamingSystem/ura",
-                        "value": "87654321",
-                    }
+                    {"system": "http://fhir.nl/fhir/NamingSystem/ura", "value": "87654321"},
                 ],
+                "resourceType": "CapabilityStatement",
+                "rest": [],
             },
         )
     )
-    fake.queue_get_response(DummyResponse(200, {"resourceType": "CapabilityStatement", "rest": []}))
     monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
 
     r = client.post(
@@ -640,10 +658,16 @@ def test_bgz_task_preview_location_routing_builds_task_from_template(appmod, cli
         expected_owner_display="Ziekenhuis Oost",
         expected_location_ref=None,
         expected_location_display=None,
-        expected_extension_location_ref="Location/loc-1",
-        expected_extension_location_display="Ziekenhuis Oost - Cardiologie",
+        expected_extension_location_ref=None,
+        expected_extension_location_display=None,
         expected_workflow_task_id=body["workflow_task_id"],
     )
+    ext = next(
+        e for e in (task.get("extension") or [])
+        if (e or {}).get("url") == "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-location"
+    )
+    assert ext["valueReference"]["reference"] == "Location/loc-1"
+    assert ext["valueReference"]["display"] == "Ziekenhuis Oost - Cardiologie"
 
 
 def test_bgz_task_preview_healthcareservice_routing_builds_task_from_template(appmod, client, monkeypatch):
@@ -704,6 +728,12 @@ def test_bgz_task_preview_healthcareservice_routing_builds_task_from_template(ap
         expected_extension_healthcareservice_display="Ziekenhuis Oost - Cardiologie",
         expected_workflow_task_id=body["workflow_task_id"],
     )
+    ext = next(
+        e for e in (task.get("extension") or [])
+        if (e or {}).get("url") == "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-healthcareservice"
+    )
+    assert ext["valueReference"]["reference"] == "HealthcareService/hs-1"
+    assert ext["valueReference"]["display"] == "Ziekenhuis Oost - Cardiologie"
 
 
 
@@ -817,6 +847,7 @@ def test_bgz_notify_posts_task_and_returns_result(appmod, client, monkeypatch):
     assert body["success"] is True
     assert body["target"] == "https://receiver.example/fhir/Task"
     assert body["resolved_receiver_base"] == "https://receiver.example/fhir"
+    assert body["sender_bgz_base"] == "https://sender.example/fhir"
     assert body["task_id"] == "task-123"
     assert body["task_status"] == "requested"
     assert body.get("workflow_task_id") == "wf-777"

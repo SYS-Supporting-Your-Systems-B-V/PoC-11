@@ -14,6 +14,50 @@ def _load_seeded_rows(publisher_module, conn):
     return kliniek_rows, kliniek_locatie_rows, locatie_rows, afdeling_rows, endpoint_rows
 
 
+def _build_last_updated_maps(publisher_module, endpoint_rows, kliniek_locatie_rows):
+    endpoint_last_updated_by_kliniek = {}
+    endpoint_last_updated_by_locatie = {}
+    endpoint_last_updated_by_afdeling = {}
+    for endpoint_row in endpoint_rows:
+        publisher_module._set_max_datetime(
+            endpoint_last_updated_by_kliniek,
+            endpoint_row.get("KliniekId"),
+            endpoint_row.get("LaatstGewijzigdOp"),
+        )
+        publisher_module._set_max_datetime(
+            endpoint_last_updated_by_locatie,
+            endpoint_row.get("LocatieId"),
+            endpoint_row.get("LaatstGewijzigdOp"),
+        )
+        publisher_module._set_max_datetime(
+            endpoint_last_updated_by_afdeling,
+            endpoint_row.get("AfdelingId"),
+            endpoint_row.get("LaatstGewijzigdOp"),
+        )
+
+    kliniek_locatie_last_updated_by_locatie = {}
+    kliniek_locatie_last_updated_by_kliniek = {}
+    for kliniek_locatie_row in kliniek_locatie_rows:
+        publisher_module._set_max_datetime(
+            kliniek_locatie_last_updated_by_locatie,
+            kliniek_locatie_row.get("LocatieId"),
+            kliniek_locatie_row.get("LaatstGewijzigdOp"),
+        )
+        publisher_module._set_max_datetime(
+            kliniek_locatie_last_updated_by_kliniek,
+            kliniek_locatie_row.get("KliniekId"),
+            kliniek_locatie_row.get("LaatstGewijzigdOp"),
+        )
+
+    return (
+        endpoint_last_updated_by_kliniek,
+        endpoint_last_updated_by_locatie,
+        endpoint_last_updated_by_afdeling,
+        kliniek_locatie_last_updated_by_locatie,
+        kliniek_locatie_last_updated_by_kliniek,
+    )
+
+
 def test_build_resources_from_seed_sqlite_passes_sanity(publisher_module, base_cfg):
     with publisher_module._connect(base_cfg.sql_conn) as conn:
         kliniek_rows, kliniek_locatie_rows, locatie_rows, afdeling_rows, endpoint_rows = _load_seeded_rows(publisher_module, conn)
@@ -29,12 +73,43 @@ def test_build_resources_from_seed_sqlite_passes_sanity(publisher_module, base_c
         locaties_by_kliniek.setdefault(kid, []).append(lid)
         kliniek_by_locatie.setdefault(lid, kid)
 
+    (
+        endpoint_last_updated_by_kliniek,
+        endpoint_last_updated_by_locatie,
+        endpoint_last_updated_by_afdeling,
+        kliniek_locatie_last_updated_by_locatie,
+        kliniek_locatie_last_updated_by_kliniek,
+    ) = _build_last_updated_maps(publisher_module, endpoint_rows, kliniek_locatie_rows)
+
     ep_resources_all, ep_by_kliniek, ep_by_locatie, ep_by_afdeling = publisher_module._build_endpoints(base_cfg, endpoint_rows)
     org_resources_all, ura_by_kliniek, name_by_kliniek = publisher_module._build_organizations(
-        base_cfg, kliniek_rows, afdeling_rows, ep_by_kliniek, ep_by_afdeling
+        base_cfg,
+        kliniek_rows,
+        afdeling_rows,
+        ep_by_kliniek,
+        ep_by_afdeling,
+        endpoint_last_updated_by_kliniek,
+        endpoint_last_updated_by_afdeling,
     )
-    loc_resources_all = publisher_module._build_locations(base_cfg, locatie_rows, ep_by_locatie, ura_by_kliniek, name_by_kliniek)
-    svc_resources_all = publisher_module._build_healthcare_services(base_cfg, afdeling_rows, locaties_by_kliniek, ep_by_afdeling, ura_by_kliniek, name_by_kliniek)
+    loc_resources_all = publisher_module._build_locations(
+        base_cfg,
+        locatie_rows,
+        ep_by_locatie,
+        ura_by_kliniek,
+        name_by_kliniek,
+        kliniek_locatie_last_updated_by_locatie,
+        endpoint_last_updated_by_locatie,
+    )
+    svc_resources_all = publisher_module._build_healthcare_services(
+        base_cfg,
+        afdeling_rows,
+        locaties_by_kliniek,
+        ep_by_afdeling,
+        ura_by_kliniek,
+        name_by_kliniek,
+        kliniek_locatie_last_updated_by_kliniek,
+        endpoint_last_updated_by_afdeling,
+    )
 
     all_resources = []
     all_resources.extend(ep_resources_all)
@@ -91,6 +166,14 @@ def test_bgz_policy_per_clinic_fails_when_endpoint_not_active(publisher_module, 
             continue
         locaties_by_kliniek.setdefault(int(kl["KliniekId"]), []).append(int(kl["LocatieId"]))
 
+    (
+        endpoint_last_updated_by_kliniek,
+        endpoint_last_updated_by_locatie,
+        endpoint_last_updated_by_afdeling,
+        kliniek_locatie_last_updated_by_locatie,
+        kliniek_locatie_last_updated_by_kliniek,
+    ) = _build_last_updated_maps(publisher_module, endpoint_rows, kliniek_locatie_rows)
+
     ep_resources_all, ep_by_kliniek, ep_by_locatie, ep_by_afdeling = publisher_module._build_endpoints(base_cfg, endpoint_rows)
 
     # Forceer: endpoint niet actief
@@ -98,10 +181,33 @@ def test_bgz_policy_per_clinic_fails_when_endpoint_not_active(publisher_module, 
     ep_resources_all[0]["status"] = "off"
 
     org_resources_all, ura_by_kliniek, name_by_kliniek = publisher_module._build_organizations(
-        base_cfg, kliniek_rows, afdeling_rows, ep_by_kliniek, ep_by_afdeling
+        base_cfg,
+        kliniek_rows,
+        afdeling_rows,
+        ep_by_kliniek,
+        ep_by_afdeling,
+        endpoint_last_updated_by_kliniek,
+        endpoint_last_updated_by_afdeling,
     )
-    loc_resources_all = publisher_module._build_locations(base_cfg, locatie_rows, ep_by_locatie, ura_by_kliniek, name_by_kliniek)
-    svc_resources_all = publisher_module._build_healthcare_services(base_cfg, afdeling_rows, locaties_by_kliniek, ep_by_afdeling, ura_by_kliniek, name_by_kliniek)
+    loc_resources_all = publisher_module._build_locations(
+        base_cfg,
+        locatie_rows,
+        ep_by_locatie,
+        ura_by_kliniek,
+        name_by_kliniek,
+        kliniek_locatie_last_updated_by_locatie,
+        endpoint_last_updated_by_locatie,
+    )
+    svc_resources_all = publisher_module._build_healthcare_services(
+        base_cfg,
+        afdeling_rows,
+        locaties_by_kliniek,
+        ep_by_afdeling,
+        ura_by_kliniek,
+        name_by_kliniek,
+        kliniek_locatie_last_updated_by_kliniek,
+        endpoint_last_updated_by_afdeling,
+    )
 
     all_resources = ep_resources_all + org_resources_all + loc_resources_all + svc_resources_all
 

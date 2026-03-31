@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY iti130_publisher.py ./
+COPY . ./
 
 ENV SQL_CONN=sqlite:///demo.db \
     FHIR_BASE=http://hapi-directory:8080/fhir
