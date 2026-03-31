@@ -1403,9 +1403,7 @@ def _init_sqlite_schema(conn: Connection, seed: bool = True, reset_seed: bool = 
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
         900, 1, None, None,
         "active", ENDPOINT_CONN_SYSTEM, "hl7-fhir-rest", "HL7 FHIR REST",
-        # Leave payloadType* empty in the SQLite seed row so the publisher will apply
-        # cfg.default_endpoint_payload_types (which includes both BGZ and ITI-91).
-        None, None, None,
+        NL_GF_DATA_EXCHANGE_CAPABILITIES_SYSTEM, BGZ_SERVER_CAPABILITIES_CODE, "BGZ Server",
         "application/fhir+json",
         "https://mach2.disyepd.com/notifiedpull/fhir", "FHIR API", "+31-20-0000000", "fhir@demo.invalid",
         "2020-01-01", None, 1, now
@@ -1437,7 +1435,22 @@ def _init_sqlite_schema(conn: Connection, seed: bool = True, reset_seed: bool = 
         "active", ENDPOINT_CONN_SYSTEM, "direct-project", "Direct Project",
         NL_GF_DATA_EXCHANGE_CAPABILITIES_SYSTEM, "Nuts-OAuth", "Nuts OAuth endpoint",
         None,
-        "https://mach2.disyepd.com/nuts-oauth2/oauth2/00700700", "Nuts OAuth2", None, None,
+        "https://mach2.disyepd.com/nuts-oauth2", "Nuts OAuth2", None, None,
+        "2020-01-01", None, 1, now
+    ))
+    # Dedicated mCSD directory endpoint for ITI-91 discovery/sync
+    conn.exec_driver_sql("""INSERT INTO tblEndpoint (
+        endpointkey, kliniekkey, locatiekey, afdelingkey,
+        status, connectionTypeSystemUri, connectionTypeCode, connectionTypeDisplay,
+        payloadTypeSystemUri, payloadTypeCode, payloadTypeDisplay, payloadMimeType,
+        adres, naam, telefoon, email,
+        ingangsdatum, einddatum, actief, LaatstGewijzigdOp
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+        903, 1, None, None,
+        "active", ENDPOINT_CONN_SYSTEM, "hl7-fhir-rest", "HL7 FHIR REST",
+        NL_GF_DATA_EXCHANGE_CAPABILITIES_SYSTEM, MCSD_ITI91_CAPABILITIES_CODE, "Care Services Directory for Update Client",
+        "application/fhir+json",
+        "https://mach2.disyepd.com/fhir", "Administration Directory", None, None,
         "2020-01-01", None, 1, now
     ))
 

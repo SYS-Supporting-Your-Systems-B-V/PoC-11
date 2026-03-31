@@ -1850,17 +1850,6 @@
 
         const endpointId = (selectedEndpoint && selectedEndpoint.endpoint_id) ? String(selectedEndpoint.endpoint_id).trim() : "";
 
-        const notifyPayload = {
-            receiver_ura: receiverUra,
-            receiver_name: receiverName,
-            receiver_org_ref: orgRef || null,
-            receiver_org_name: orgName || null,
-            receiver_target_ref: targetRef,
-            receiver_notification_endpoint_id: endpointId || null,
-            patient_bsn: PATIENT_BSN,
-            patient_name: PATIENT_NAME
-        };
-
         const preflightUrl = `${BASE_URL}/bgz/preflight`;
         const notifyUrl = `${BASE_URL}/bgz/notify`;
 
@@ -1913,6 +1902,20 @@
                     bgzStatusEl.textContent = "Notificatie versturen...";
                     bgzStatusEl.className = "status-line";
                 }
+
+                const notifyEndpointId = (selectedEndpoint && selectedEndpoint.endpoint_id)
+                    ? String(selectedEndpoint.endpoint_id).trim()
+                    : "";
+                const notifyPayload = {
+                    receiver_ura: receiverUra,
+                    receiver_name: receiverName,
+                    receiver_org_ref: orgRef || null,
+                    receiver_org_name: orgName || null,
+                    receiver_target_ref: targetRef,
+                    receiver_notification_endpoint_id: notifyEndpointId || null,
+                    patient_bsn: PATIENT_BSN,
+                    patient_name: PATIENT_NAME
+                };
 
                 return fetch(notifyUrl, { method: "POST", headers: headers, body: JSON.stringify(notifyPayload) });
             })
