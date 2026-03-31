@@ -1,4 +1,4 @@
-FROM nutsfoundation/nuts-node:latest
+FROM nutsfoundation/nuts-node:6.2.0
 
 USER root
 

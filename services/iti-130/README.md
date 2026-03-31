@@ -34,7 +34,7 @@ verwachte successtatus, niet een fout.
 Wil je dezelfde seed-run opnieuw uitvoeren binnen de stack:
 
 ```bash
-docker compose -f poc9-start-stack/docker-compose.yaml run --rm iti-130-publisher
+docker compose -f start-stack/docker-compose.yaml run --rm iti-130-publisher
 ```
 
 ## Vereisten
