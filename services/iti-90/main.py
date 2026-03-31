@@ -1214,7 +1214,9 @@ def _build_httpx_verify() -> bool | ssl.SSLContext:
         if not ca_file.is_file():
             logger.warning("[mCSD] CA bundle not found file=%s; falling back to system trust store", str(ca_file))
             return True
-        return ssl.create_default_context(cafile=str(ca_file))
+        ctx = ssl.create_default_context()
+        ctx.load_verify_locations(cafile=str(ca_file))
+        return ctx
     return True
 
 

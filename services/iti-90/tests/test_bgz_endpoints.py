@@ -463,6 +463,35 @@ def test_bgz_load_data_puts_all_resources_and_updates_sender_ura(appmod, client,
     assert ura_ident.get("value") == "99999999"
 
 
+def test_build_httpx_verify_adds_custom_ca_to_system_store(appmod, monkeypatch, tmp_path):
+    ca_file = tmp_path / "custom-root.crt"
+    ca_file.write_text("dummy-ca", encoding="utf-8")
+
+    class DummyContext:
+        def __init__(self):
+            self.loaded_cafile = None
+
+        def load_verify_locations(self, *, cafile: str):
+            self.loaded_cafile = cafile
+
+    ctx = DummyContext()
+    create_default_context_calls: list[None] = []
+
+    def _fake_create_default_context():
+        create_default_context_calls.append(None)
+        return ctx
+
+    monkeypatch.setattr(appmod.settings, "verify_tls", True, raising=False)
+    monkeypatch.setattr(appmod.settings, "ca_certs_file", str(ca_file), raising=False)
+    monkeypatch.setattr(appmod.ssl, "create_default_context", _fake_create_default_context)
+
+    verify = appmod._build_httpx_verify()
+
+    assert verify is ctx
+    assert len(create_default_context_calls) == 1
+    assert ctx.loaded_cafile == str(ca_file)
+
+
 def test_bgz_preflight_location_routing_and_metadata_probe_ok(appmod, client, monkeypatch):
     async def _fake_capability_mapping(*, target: str, organization: str | None, include_oauth: bool, limit: int):
         return _capability_mapping_stub(target=target)
