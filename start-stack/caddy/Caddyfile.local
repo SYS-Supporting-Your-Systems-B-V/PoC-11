@@ -5,10 +5,14 @@
   }
 
   handle_path /receiver-mock/* {
+  # Barebones receiver-side notification endpoint used for local sender self-tests.
     reverse_proxy mock-notification-receiver:8002
   }
 
   handle_path /notifiedpull/* {
+    # Sender-side protected resource serving now goes through the dedicated gateway.
+    # The gateway performs token introspection plus authorization-base / task / role checks
+    # before proxying to the internal sender HAPI instance.
     reverse_proxy sender-bgz-gateway:8001
   }
 
