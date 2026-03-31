@@ -53,3 +53,45 @@ def namespace_resource_reference(
     if isinstance(res, DomainResource):
         return res
     raise ValueError("Expected DomainResource after namespacing")
+
+
+def _remap_reference(ref: Reference, replacements: dict[str, str]) -> Reference | None:
+    valid_reference = validate_reference(ref)
+    if not valid_reference or ref.reference is None:
+        return None
+
+    res_type, _id = get_resource_from_reference(ref.reference)
+    if not res_type or not _id:
+        return None
+
+    replacement = replacements.get(f"{res_type}/{_id}")
+    if replacement is not None:
+        ref.reference = replacement
+
+    return ref
+
+
+def _remap_in_value(value: Any, replacements: dict[str, str]) -> Any:
+    if isinstance(value, Reference):
+        return _remap_reference(value, replacements) or value
+
+    if hasattr(value, "elements_sequence"):
+        for attr in value.elements_sequence():
+            attr_val = getattr(value, attr, None)
+            if attr_val is not None:
+                setattr(value, attr, _remap_in_value(attr_val, replacements))
+        return value
+
+    if isinstance(value, list):
+        return [_remap_in_value(v, replacements) for v in value]
+
+    return value
+
+
+def remap_resource_references(
+    data: DomainResource, replacements: dict[str, str]
+) -> DomainResource:
+    res = _remap_in_value(data, replacements)
+    if isinstance(res, DomainResource):
+        return res
+    raise ValueError("Expected DomainResource after remapping")

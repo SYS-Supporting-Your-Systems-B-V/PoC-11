@@ -19,8 +19,10 @@ from app.models.adjacency.node import (
 )
 from app.models.resource_map.dto import ResourceMapDto, ResourceMapUpdateDto, ResourceMapDeleteDto
 from app.services.entity.resource_map_service import ResourceMapService
+from app.services.fhir.bundle.utils import get_resource_from_reference
 from app.services.fhir.fhir_service import FhirService
 from app.services.fhir.id_utils import make_namespaced_fhir_id
+from app.services.fhir.references.reference_namespacer import remap_resource_references
 from app.services.api.fhir_api import FhirApi
 from app.services.update.computation_service import ComputationService
 from app.services.update.filter_ura import filter_ura
@@ -146,6 +148,42 @@ class AdjacencyMapService:
             missing_entries = self.get_directory_data(
                 [BundleRequestParams(**ref.model_dump()) for ref in to_fetch]
             )
+            replacements = self.__get_source_copy_replacements(missing_entries)
+            if replacements:
+                self.__remap_adj_map_references(adj_map, replacements)
+
+                existing_keys = set(adj_map.data.keys())
+                existing_keys.update(
+                    entry_key
+                    for entry_key in (
+                        self.__entry_cache_key(entry) for entry in missing_entries
+                    )
+                    if entry_key is not None
+                )
+
+                canonical_refs: list[BundleRequestParams] = []
+                for replacement in replacements.values():
+                    if replacement.cache_key() in existing_keys:
+                        continue
+
+                    canonical_refs.append(
+                        BundleRequestParams(
+                            id=replacement.id,
+                            resource_type=replacement.resource_type,
+                        )
+                    )
+                    existing_keys.add(replacement.cache_key())
+
+                if canonical_refs:
+                    missing_entries.extend(self.get_directory_data(canonical_refs))
+                    attempted_keys.update((ref.resource_type, ref.id) for ref in canonical_refs)
+
+                missing_entries = [
+                    entry
+                    for entry in missing_entries
+                    if self.__entry_cache_key(entry) not in replacements
+                ]
+
             # Create nodes for the entries we found
             missing_nodes = [self.create_node(entry) for entry in missing_entries]
             if missing_nodes:
@@ -199,6 +237,76 @@ class AdjacencyMapService:
                 resource_map=resource_map,
             )
             node.update_data = self.create_update_data(node, resource_map)
+
+    @staticmethod
+    def __entry_cache_key(entry: BundleEntry) -> str | None:
+        res_type, res_id = FhirService.get_resource_type_and_id_from_entry(entry)
+        if not res_type or not res_id:
+            return None
+
+        return f"{res_type}/{res_id}"
+
+    @staticmethod
+    def __get_source_copy_replacements(
+        entries: list[BundleEntry],
+    ) -> dict[str, NodeReference]:
+        replacements: dict[str, NodeReference] = {}
+        for entry in entries:
+            resource = entry.resource
+            if resource is None or resource.meta is None or resource.meta.source is None:
+                continue
+
+            res_type, res_id = FhirService.get_resource_type_and_id_from_entry(entry)
+            source_type, source_id = get_resource_from_reference(str(resource.meta.source))
+
+            if source_type != res_type or source_id is None or source_id == res_id:
+                continue
+
+            replacements[f"{res_type}/{res_id}"] = NodeReference(
+                resource_type=source_type,
+                id=source_id,
+            )
+
+        return replacements
+
+    @staticmethod
+    def __remap_node_references(
+        references: list[NodeReference],
+        replacements: dict[str, NodeReference],
+    ) -> list[NodeReference]:
+        remapped: list[NodeReference] = []
+        seen: set[str] = set()
+
+        for reference in references:
+            replacement = replacements.get(reference.cache_key(), reference)
+            cache_key = replacement.cache_key()
+            if cache_key in seen:
+                continue
+
+            seen.add(cache_key)
+            remapped.append(replacement)
+
+        return remapped
+
+    @staticmethod
+    def __remap_adj_map_references(
+        adj_map: AdjacencyMap,
+        replacements: dict[str, NodeReference],
+    ) -> None:
+        replacement_refs = {
+            source: f"{target.resource_type}/{target.id}"
+            for source, target in replacements.items()
+        }
+
+        for node in adj_map.data.values():
+            node.references = AdjacencyMapService.__remap_node_references(
+                node.references,
+                replacements,
+            )
+            if node.directory_entry is None or node.directory_entry.resource is None:
+                continue
+
+            remap_resource_references(node.directory_entry.resource, replacement_refs)
 
 
     @staticmethod

@@ -365,6 +365,18 @@ class ConfigMcsd(BaseModel):
             return v.lower() in ("yes", "true", "t", "1")
         return bool(v)
 
+    @field_validator("verify_ca", mode="before")
+    def validate_verify_ca(cls, v: Any) -> str | bool:
+        if v in (None, "", " "):
+            return True
+        if isinstance(v, str):
+            lower = v.lower()
+            if lower in ("yes", "true", "t", "1"):
+                return True
+            if lower in ("no", "false", "f", "0"):
+                return False
+        return v
+
     @field_validator("require_mcsd_profiles", mode="before")
     def validate_require_mcsd_profiles(cls, v: Any) -> bool:
         if v in (None, "", " "):

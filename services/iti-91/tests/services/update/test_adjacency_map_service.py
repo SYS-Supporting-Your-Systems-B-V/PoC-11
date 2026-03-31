@@ -109,6 +109,69 @@ def test_build_adjacency_map_should_succeed_when_refs_are_missing(
     assert expected.data == actual.data
 
 
+def test_build_adjacency_map_should_remap_same_type_source_copy_references(
+    adjacency_map_service: AdjacencyMapService,
+    mock_directory_id: str,
+) -> None:
+    practitioner_role_entry = create_bundle_entry(
+        {
+            "fullUrl": "http://example-service.com/fhir/PractitionerRole/pr-role-id",
+            "resource": {
+                "resourceType": "PractitionerRole",
+                "id": "pr-role-id",
+                "organization": {"reference": "Organization/org-copy-id"},
+            },
+            "request": {"method": "PUT", "url": "PractitionerRole/pr-role-id"},
+        }
+    )
+    source_copy_org_entry = create_bundle_entry(
+        {
+            "fullUrl": "http://example-service.com/fhir/Organization/org-copy-id",
+            "resource": {
+                "resourceType": "Organization",
+                "id": "org-copy-id",
+                "name": "Example organization",
+                "meta": {
+                    "source": "http://example-service.com/fhir/Organization/org-id",
+                },
+            },
+            "request": {"method": "PUT", "url": "Organization/org-copy-id"},
+        }
+    )
+    canonical_org_entry = create_bundle_entry(
+        {
+            "fullUrl": "http://example-service.com/fhir/Organization/org-id",
+            "resource": {
+                "resourceType": "Organization",
+                "id": "org-id",
+                "name": "Example organization",
+            },
+            "request": {"method": "PUT", "url": "Organization/org-id"},
+        }
+    )
+    adjacency_map_service.get_directory_data = MagicMock(  # type: ignore[assignment]
+        side_effect=[[source_copy_org_entry], [canonical_org_entry]]
+    )
+    adjacency_map_service.get_update_client_data = MagicMock(return_value=[])  # type: ignore[assignment]
+
+    actual = adjacency_map_service.build_adjacency_map([practitioner_role_entry])
+
+    assert "Organization/org-copy-id" not in actual.data
+    assert "Organization/org-id" in actual.data
+
+    practitioner_role_node = actual.data["PractitionerRole/pr-role-id"]
+    assert practitioner_role_node.references == [
+        NodeReference(resource_type="Organization", id="org-id")
+    ]
+    assert practitioner_role_node.update_data is not None
+    assert practitioner_role_node.update_data.bundle_entry is not None
+    assert practitioner_role_node.update_data.bundle_entry.resource is not None
+    assert (
+        practitioner_role_node.update_data.bundle_entry.resource.organization.reference  # type: ignore[attr-defined]
+        == f"Organization/{mock_directory_id}-org-id"
+    )
+
+
 def test_build_adjacency_map_should_succeed_when_data_from_update_client_exists(
     adjacency_map_service: AdjacencyMapService,
     computation_service: ComputationService,
