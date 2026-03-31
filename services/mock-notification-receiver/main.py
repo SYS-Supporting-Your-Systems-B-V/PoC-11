@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import uvicorn
@@ -104,12 +104,12 @@ def _first_non_empty(data: dict[str, Any], *paths: tuple[str, ...]) -> Any:
     return None
 
 
-def _raise_http(status_code: int, reason: str, message: str, **extra: Any) -> None:
+def _raise_http(http_status_code: int, reason: str, message: str, **extra: Any) -> None:
     detail: dict[str, Any] = {"reason": reason, "message": message}
     for key, value in extra.items():
         if value is not None:
             detail[key] = value
-    raise HTTPException(status_code=status_code, detail=detail)
+    raise HTTPException(status_code=http_status_code, detail=detail)
 
 
 def _join_url(base: str, path: str) -> str:
@@ -128,6 +128,13 @@ def _normalize_reference(value: Any) -> str:
 
 def _normalize_base(value: str) -> str:
     return str(value or "").strip().rstrip("/")
+
+
+def _url_origin(value: str) -> str:
+    parsed = urlsplit(str(value or "").strip())
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return _normalize_base(value)
 
 
 def _split_ref(ref: str) -> tuple[str, str]:
@@ -607,7 +614,12 @@ def _dezi_client_id() -> str:
 
 def _dezi_callback_url() -> str:
     public_root = _normalize_base(settings.public_root)
-    callback_path = str(settings.dezi_callback_path or "").strip() or "/auth/dezi/callback"
+    callback_path = str(settings.dezi_callback_path or "").strip() or "auth/dezi/callback"
+    lowered = callback_path.lower()
+    if lowered.startswith("https://") or lowered.startswith("http://"):
+        return _normalize_base(callback_path)
+    if callback_path.startswith("/"):
+        return _join_url(_url_origin(public_root), callback_path)
     return _join_url(public_root, callback_path)
 
 
@@ -722,7 +734,7 @@ async def _build_private_key_jwt(token_endpoint: str, oidc_config: dict[str, Any
     material = await _get_dezi_material()
     audience = str(settings.dezi_client_assertion_audience or "").strip()
     if not audience:
-        audience = str(oidc_config.get("issuer") or "").strip() or str(token_endpoint or "").strip()
+        audience = str(token_endpoint or "").strip() or str(oidc_config.get("issuer") or "").strip()
     now = int(time.time())
     claims = {
         "iss": _dezi_client_id(),
@@ -1247,7 +1259,10 @@ def _portal_state(request: Request) -> dict[str, Any]:
             "logged_in": bool(session and str(session.dezi_id_token or "").strip()),
             "logged_in_at": (session.dezi_logged_in_at if session else None),
             "identity": copy.deepcopy(session.dezi_identity) if session else {},
+            "claims": copy.deepcopy(session.dezi_claims) if session else {},
             "token_metadata": copy.deepcopy(session.dezi_token_metadata) if session else {},
+            "id_token": (str(session.dezi_id_token or "").strip() if session else None) or None,
+            "userinfo_jwt": (str(session.dezi_userinfo_jwt or "").strip() if session else None) or None,
         },
         "tasks": [
             {
@@ -1270,7 +1285,7 @@ async def lifespan(app: FastAPI):
     app.state.dezi_client = httpx.AsyncClient(
         timeout=httpx.Timeout(settings.dezi_timeout),
         verify=_verify_arg(settings.dezi_verify_tls, settings.dezi_ca_certs_file),
-        follow_redirects=False,
+        follow_redirects=True,
     )
     app.state.task_store = TaskStore()
     app.state.session_store = SessionStore()
@@ -1342,6 +1357,7 @@ async def dezi_login(request: Request, task_id: str | None = None) -> Response:
     return response
 
 
+@app.get("/dezi")
 @app.get("/auth/dezi/callback")
 async def dezi_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None) -> Response:
     session, _created = _load_session(request, create=False)
@@ -1363,9 +1379,9 @@ async def dezi_callback(request: Request, code: str | None = None, state: str | 
     session.pending_task_id = None
     session = _persist_session(session)
 
-    redirect_target = "/"
+    redirect_target = f"{_normalize_base(settings.public_root)}/"
     if task_id:
-        redirect_target = f"/?task_id={task_id}"
+        redirect_target = f"{redirect_target}?{urlencode({'task_id': task_id})}"
     response = RedirectResponse(url=redirect_target, status_code=302)
     _set_session_cookie(response, session)
     return response

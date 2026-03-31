@@ -38,12 +38,12 @@ class Settings(BaseSettings):
     session_cookie_name: str = Field("mock_receiver_session", validation_alias="MOCK_RECEIVER_SESSION_COOKIE_NAME")
     session_cookie_secure: bool = Field(True, validation_alias="MOCK_RECEIVER_SESSION_COOKIE_SECURE")
     dezi_well_known_url: str = Field(
-        "https://max.proeftuin.uzi-online.rdobeheer.nl/.well-known/openid-configuration",
+        "https://acceptatie.auth.dezi.nl/.well-known/openid-configuration",
         validation_alias="MOCK_RECEIVER_DEZI_WELL_KNOWN_URL",
     )
     dezi_client_id: Optional[str] = Field(None, validation_alias="MOCK_RECEIVER_DEZI_CLIENT_ID")
     dezi_scope: str = Field("openid", validation_alias="MOCK_RECEIVER_DEZI_SCOPE")
-    dezi_callback_path: str = Field("/auth/dezi/callback", validation_alias="MOCK_RECEIVER_DEZI_CALLBACK_PATH")
+    dezi_callback_path: str = Field("auth/dezi/callback", validation_alias="MOCK_RECEIVER_DEZI_CALLBACK_PATH")
     dezi_timeout: float = Field(20.0, validation_alias="MOCK_RECEIVER_DEZI_TIMEOUT")
     dezi_verify_tls: bool = Field(True, validation_alias="MOCK_RECEIVER_DEZI_VERIFY_TLS")
     dezi_ca_certs_file: Optional[str] = Field(None, validation_alias="MOCK_RECEIVER_DEZI_CA_CERTS_FILE")

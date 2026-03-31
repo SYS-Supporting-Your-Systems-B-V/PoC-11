@@ -281,6 +281,13 @@
       line-height: 1.5;
     }
 
+    .identity-block pre {
+      margin-top: 10px;
+      min-height: 0;
+      max-height: 260px;
+      font-size: 0.8rem;
+    }
+
     pre {
       margin: 0;
       white-space: pre-wrap;
@@ -338,7 +345,7 @@
         <div class="toolbar-group" id="status-badges"></div>
         <div class="toolbar-group">
           <button type="button" class="secondary" id="refresh-button">Refresh</button>
-          <a class="link-button accent" id="login-button" href="/auth/dezi/login">Login With DEZI</a>
+          <a class="link-button accent" id="login-button" href="auth/dezi/login">Login With DEZI</a>
           <button type="button" class="secondary" id="logout-button">Logout</button>
         </div>
       </div>
@@ -401,6 +408,20 @@
       return span;
     }
 
+    function appendTextBlock(parent, title, text) {
+      const block = document.createElement("div");
+      block.className = "identity-block";
+      block.innerHTML = `<h3>${title}</h3>`;
+      const pre = document.createElement("pre");
+      pre.textContent = text;
+      block.appendChild(pre);
+      parent.appendChild(block);
+    }
+
+    function appendJsonBlock(parent, title, value) {
+      appendTextBlock(parent, title, prettyJson(value));
+    }
+
     function renderStatus(state) {
       statusBadges.replaceChildren();
       statusBadges.appendChild(makeBadge(`Receiver base: ${state.service.public_base}`, ""));
@@ -426,6 +447,29 @@
       details.className = "identity-block";
       details.innerHTML = `<h3>Session Metadata</h3><p>Client ID: ${state.service.dezi_client_id}<br>Callback: ${state.service.dezi_callback_url}<br>Logged in at: ${state.dezi.logged_in_at || "-"}</p>`;
       identity.appendChild(details);
+
+      if (state.dezi.logged_in) {
+        if (state.dezi.claims && Object.keys(state.dezi.claims).length) {
+          appendJsonBlock(identity, "DEZI VC Claims", state.dezi.claims);
+        }
+        if (state.dezi.userinfo_jwt) {
+          appendTextBlock(identity, "DEZI VC JWT", state.dezi.userinfo_jwt);
+        }
+        if (state.dezi.id_token) {
+          appendTextBlock(identity, "DEZI id_token", state.dezi.id_token);
+        }
+      }
+    }
+
+    function loginHref(taskId) {
+      return taskId
+        ? `auth/dezi/login?task_id=${encodeURIComponent(taskId)}`
+        : "auth/dezi/login";
+    }
+
+    function updateLoginButtons() {
+      loginButton.href = loginHref(targetTaskId);
+      loginButton.textContent = "Login With DEZI";
     }
 
     function taskCard(task) {
@@ -473,7 +517,7 @@
 
       const loginLink = document.createElement("a");
       loginLink.className = "link-button secondary";
-      loginLink.href = `/auth/dezi/login?task_id=${encodeURIComponent(task.summary.id || "")}`;
+      loginLink.href = loginHref(task.summary.id || "");
       loginLink.textContent = "Login For This Task";
       actions.appendChild(loginLink);
 
@@ -486,7 +530,7 @@
         pullButton.disabled = true;
         setResult("Pull in progress...");
         try {
-          const response = await fetch(`/ui/tasks/${encodeURIComponent(task.summary.id)}/pull`, {
+          const response = await fetch(`ui/tasks/${encodeURIComponent(task.summary.id)}/pull`, {
             method: "POST",
             headers: {
               "Accept": "application/json"
@@ -542,14 +586,12 @@
     async function loadState() {
       refreshButton.disabled = true;
       try {
-        const response = await fetch("/ui/state", { headers: { "Accept": "application/json" } });
+        const response = await fetch("ui/state", { headers: { "Accept": "application/json" } });
         currentState = await response.json();
         renderStatus(currentState);
         renderIdentity(currentState);
         renderTasks(currentState);
-        loginButton.href = targetTaskId
-          ? `/auth/dezi/login?task_id=${encodeURIComponent(targetTaskId)}`
-          : "/auth/dezi/login";
+        updateLoginButtons();
       } catch (error) {
         setResult({ error: String(error) });
       } finally {
@@ -564,7 +606,7 @@
     logoutButton.addEventListener("click", async () => {
       logoutButton.disabled = true;
       try {
-        await fetch("/auth/dezi/logout", {
+        await fetch("auth/dezi/logout", {
           method: "POST",
           headers: { "Accept": "application/json" }
         });

@@ -97,7 +97,9 @@ services:
     volumes:
       - ../services/mock-notification-receiver:/app
     environment:
-      MOCK_RECEIVER_PUBLIC_BASE: https://${PUBLIC_DOMAIN:-mach2.disyepd.com}/receiver-mock/fhir
+      MOCK_RECEIVER_PUBLIC_ROOT: ${MOCK_RECEIVER_PUBLIC_ROOT:-https://mach2.disyepd.com/receiver-mock}
+      MOCK_RECEIVER_PUBLIC_BASE: ${MOCK_RECEIVER_PUBLIC_BASE:-https://mach2.disyepd.com/receiver-mock/fhir}
+      MOCK_RECEIVER_DEZI_CALLBACK_PATH: ${MOCK_RECEIVER_DEZI_CALLBACK_PATH:-auth/dezi/callback}
     networks:
       - mcsd_update_client_net
     restart: unless-stopped

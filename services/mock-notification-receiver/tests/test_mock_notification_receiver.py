@@ -1,9 +1,11 @@
+import asyncio
 import importlib.util
 from urllib.parse import parse_qs, urlparse
 import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from jwcrypto import jwk
 
 
 def _import_app_module():
@@ -36,7 +38,7 @@ def _set_settings(monkeypatch, appmod) -> None:
     monkeypatch.setattr(appmod.settings, "receiver_organization_ura", "87654321", raising=False)
     monkeypatch.setattr(appmod.settings, "dezi_client_id", "87654321", raising=False)
     monkeypatch.setattr(appmod.settings, "dezi_scope", "openid", raising=False)
-    monkeypatch.setattr(appmod.settings, "dezi_callback_path", "/auth/dezi/callback", raising=False)
+    monkeypatch.setattr(appmod.settings, "dezi_callback_path", "auth/dezi/callback", raising=False)
 
 
 def _task_payload(sender_ura: str = "12345678") -> dict:
@@ -217,6 +219,76 @@ def test_ui_state_lists_tasks_and_reports_logged_out_session(monkeypatch):
     assert body["tasks"][0]["summary"]["authorization_base"] == "auth-123"
 
 
+def test_portal_includes_dezi_login_link(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    with TestClient(appmod.app) as client:
+        response = client.get("/")
+
+    assert response.status_code == 200
+    assert "DEZI Session" in response.text
+    assert 'href="auth/dezi/login"' in response.text
+    assert 'fetch("ui/state"' in response.text
+    assert "Proeftuin Test Identities" not in response.text
+
+
+def test_ui_state_includes_dezi_claims_and_tokens_when_logged_in(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    with TestClient(appmod.app) as client:
+        session = appmod.app.state.session_store.create()
+        session.dezi_logged_in_at = "2026-03-31T15:00:00Z"
+        session.dezi_id_token = "dezi-id-token"
+        session.dezi_userinfo_jwt = "dezi-userinfo-jwt"
+        session.dezi_identity = {"display_name": "Dr. Demo", "organization_ura": "87654321", "roles": ["01.041"]}
+        session.dezi_claims = {"sub": "demo-sub", "relations": [{"ura": "87654321", "roles": ["01.041"]}]}
+        session.dezi_token_metadata = {"scope": "openid"}
+        appmod.app.state.session_store.save(session)
+        client.cookies.set(appmod.settings.session_cookie_name, session.session_id)
+
+        response = client.get("/ui/state")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["dezi"]["logged_in"] is True
+    assert body["dezi"]["id_token"] == "dezi-id-token"
+    assert body["dezi"]["userinfo_jwt"] == "dezi-userinfo-jwt"
+    assert body["dezi"]["claims"]["sub"] == "demo-sub"
+
+
+def test_dezi_client_follows_redirects():
+    appmod = _import_app_module()
+
+    with TestClient(appmod.app):
+        assert appmod.app.state.dezi_client.follow_redirects is True
+
+
+def test_private_key_jwt_defaults_audience_to_token_endpoint(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    async def _fake_get_dezi_material():
+        return {
+            "certificate_thumbprint_sha1": "thumbprint-sha1",
+            "private_jwk": jwk.JWK.generate(kty="RSA", size=2048),
+        }
+
+    monkeypatch.setattr(appmod, "_get_dezi_material", _fake_get_dezi_material)
+    monkeypatch.setattr(appmod.settings, "dezi_client_assertion_audience", None, raising=False)
+
+    token = asyncio.run(
+        appmod._build_private_key_jwt(
+            "https://dezi.example/token",
+            {"issuer": "https://dezi.example"},
+        )
+    )
+
+    claims = appmod._jwt_segment_payload(token)
+    assert claims["aud"] == "https://dezi.example/token"
+
+
 def test_dezi_login_redirects_with_pkce_state_and_session(monkeypatch):
     appmod = _import_app_module()
     _set_settings(monkeypatch, appmod)
@@ -260,6 +332,50 @@ def test_dezi_login_redirects_with_pkce_state_and_session(monkeypatch):
     assert session.pending_state == params["state"][0]
     assert session.pending_nonce == params["nonce"][0]
     assert session.pending_code_verifier
+
+
+def test_dezi_callback_alias_route_exists(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    with TestClient(appmod.app) as client:
+        response = client.get("/dezi", follow_redirects=False)
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["reason"] == "session_missing"
+
+
+def test_dezi_callback_url_supports_root_level_callback(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+    monkeypatch.setattr(appmod.settings, "dezi_callback_path", "/dezi", raising=False)
+
+    assert appmod._dezi_callback_url() == "https://mach2.disyepd.com/dezi"
+
+
+def test_dezi_callback_redirects_back_to_receiver_root(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    async def _fake_perform_dezi_login(session, *, code: str):
+        assert code == "auth-code-123"
+        session.dezi_id_token = "id-token"
+        return session
+
+    monkeypatch.setattr(appmod, "_perform_dezi_login", _fake_perform_dezi_login)
+
+    with TestClient(appmod.app) as client:
+        session = appmod.app.state.session_store.create()
+        session.pending_state = "state-123"
+        session.pending_code_verifier = "verifier-123"
+        session.pending_task_id = "task-abc"
+        appmod.app.state.session_store.save(session)
+        client.cookies.set(appmod.settings.session_cookie_name, session.session_id)
+
+        response = client.get("/auth/dezi/callback?code=auth-code-123&state=state-123", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://mach2.disyepd.com/receiver-mock/?task_id=task-abc"
 
 
 def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
