@@ -78,14 +78,37 @@ def _assert_urn_uuid(value: str) -> None:
     uuid.UUID(value.split("urn:uuid:", 1)[1])
 
 
+def _find_task_extension(task: Dict[str, Any], url: str) -> Optional[Dict[str, Any]]:
+    for ext in (task or {}).get("extension") or []:
+        if (ext or {}).get("url") == url:
+            return ext
+    return None
+
+
+def _find_task_identifier(task: Dict[str, Any], system: str) -> Optional[Dict[str, Any]]:
+    for identifier in (task or {}).get("identifier") or []:
+        if (identifier or {}).get("system") == system:
+            return identifier
+    return None
+
+
+def _find_task_input(task: Dict[str, Any], code: str) -> Optional[Dict[str, Any]]:
+    for inp in (task or {}).get("input") or []:
+        coding = (((inp or {}).get("type") or {}).get("coding") or [])
+        if not isinstance(coding, list):
+            continue
+        for item in coding:
+            if (item or {}).get("code") == code:
+                return inp
+    return None
+
+
 def assert_task_matches_notification_template(
     *,
     task: Dict[str, Any],
     template: Dict[str, Any],
     sender_ura: str,
     sender_name: str,
-    sender_uzi_sys: str,
-    sender_system_name: str,
     sender_uzi_sys: str,
     sender_system_name: str,
     receiver_ura: str,
@@ -658,8 +681,8 @@ def test_bgz_task_preview_location_routing_builds_task_from_template(appmod, cli
         expected_owner_display="Ziekenhuis Oost",
         expected_location_ref=None,
         expected_location_display=None,
-        expected_extension_location_ref=None,
-        expected_extension_location_display=None,
+        expected_extension_location_ref="Location/loc-1",
+        expected_extension_location_display="Ziekenhuis Oost - Cardiologie",
         expected_workflow_task_id=body["workflow_task_id"],
     )
     ext = next(
@@ -847,7 +870,7 @@ def test_bgz_notify_posts_task_and_returns_result(appmod, client, monkeypatch):
     assert body["success"] is True
     assert body["target"] == "https://receiver.example/fhir/Task"
     assert body["resolved_receiver_base"] == "https://receiver.example/fhir"
-    assert body["sender_bgz_base"] == "https://sender.example/fhir"
+    assert body["sender_bgz_base"] is None
     assert body["task_id"] == "task-123"
     assert body["task_status"] == "requested"
     assert body.get("workflow_task_id") == "wf-777"

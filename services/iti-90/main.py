@@ -66,7 +66,13 @@ class Settings(BaseSettings):
     sender_name: Optional[str] = Field(None, validation_alias="MCSD_SENDER_NAME")
     sender_uzi_sys: Optional[str] = Field(None, validation_alias="MCSD_SENDER_UZI_SYS")
     sender_system_name: Optional[str] = Field(None, validation_alias="MCSD_SENDER_SYSTEM_NAME")
+    sender_nuts_subject_id: Optional[str] = Field(None, validation_alias="MCSD_SENDER_NUTS_SUBJECT_ID")
     sender_bgz_base: Optional[str] = Field(None, validation_alias="MCSD_SENDER_BGZ_BASE")
+    sender_bgz_public_base: Optional[str] = Field(None, validation_alias="MCSD_SENDER_BGZ_PUBLIC_BASE")
+    sender_bgz_storage_base: Optional[str] = Field(None, validation_alias="MCSD_SENDER_BGZ_STORAGE_BASE")
+    nuts_internal_base: str = Field("http://nuts-node:8083", validation_alias="MCSD_NUTS_INTERNAL_BASE")
+    receiver_notification_scope: Optional[str] = Field(None, validation_alias="MCSD_RECEIVER_NOTIFICATION_SCOPE")
+    receiver_token_timeout: Optional[float] = Field(None, validation_alias="MCSD_RECEIVER_TOKEN_TIMEOUT")
     audit_hmac_key: Optional[str] = Field(None, validation_alias="MCSD_AUDIT_HMAC_KEY")
     allow_task_preview_in_production: bool = Field(False, validation_alias="MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION")
     notifiedpull_enabled: bool = Field(True, validation_alias="MCSD_NOTIFIEDPULL_ENABLED")
@@ -1204,7 +1210,11 @@ def _build_httpx_verify() -> bool | ssl.SSLContext:
     if not settings.verify_tls:
         return False
     if settings.ca_certs_file:
-        return ssl.create_default_context(cafile=settings.ca_certs_file)
+        ca_file = Path(str(settings.ca_certs_file)).expanduser()
+        if not ca_file.is_file():
+            logger.warning("[mCSD] CA bundle not found file=%s; falling back to system trust store", str(ca_file))
+            return True
+        return ssl.create_default_context(cafile=str(ca_file))
     return True
 
 
@@ -5326,11 +5336,19 @@ async def bgz_preflight(
             status_code=500,
             detail={"reason": "misconfigured", "message": "MCSD_SENDER_UZI_SYS en/of MCSD_SENDER_SYSTEM_NAME is niet ingesteld."},
         )
-    sender_bgz_base_norm = _normalize_fhir_base(settings.sender_bgz_base or "")
-    if not sender_bgz_base_norm:
+    _sender_bgz_public_base, sender_bgz_storage_base = _resolve_sender_bgz_bases()
+    sender_bgz_storage_base_norm = _normalize_fhir_base(sender_bgz_storage_base or "")
+    if not sender_bgz_storage_base_norm:
         raise HTTPException(
             status_code=500,
-            detail={"reason": "misconfigured", "message": "MCSD_SENDER_BGZ_BASE is niet ingesteld; dit is nodig om de Workflow Task te hosten."},
+            detail={
+                "reason": "misconfigured",
+                "message": (
+                    "MCSD_SENDER_BGZ_STORAGE_BASE is niet ingesteld "
+                    "(of legacy fallback MCSD_SENDER_BGZ_BASE ontbreekt); "
+                    "dit is nodig om de Workflow Task te hosten."
+                ),
+            },
         )
     receiver_org_ref = (payload.receiver_org_ref or "").strip() or None
     receiver_target_ref = (payload.receiver_target_ref or "").strip()
