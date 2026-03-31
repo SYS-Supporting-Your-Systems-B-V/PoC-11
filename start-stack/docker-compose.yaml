@@ -170,7 +170,6 @@ services:
     environment:
       # The directory server loads stricter validation/profile config than the other HAPI nodes.
       JAVA_TOOL_OPTIONS: "-XX:InitialRAMPercentage=25.0 -XX:MaxRAMPercentage=70.0"
-    environment:
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-mach2.disyepd.com}
     configs:
       - source: hapi_directory_config
