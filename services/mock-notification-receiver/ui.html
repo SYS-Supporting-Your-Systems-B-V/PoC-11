@@ -258,6 +258,16 @@
       gap: 10px;
     }
 
+    .task-result {
+      min-height: 0;
+      display: none;
+    }
+
+    .task-result.visible {
+      display: grid;
+      gap: 12px;
+    }
+
     .identity {
       display: grid;
       gap: 14px;
@@ -302,6 +312,163 @@
       min-height: 280px;
       max-height: 820px;
       overflow: auto;
+    }
+
+    .json-section {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fcfaf5;
+      overflow: hidden;
+    }
+
+    .json-section > summary {
+      list-style: none;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .json-section > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .json-section > summary {
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: #f5efe4;
+      font-weight: 600;
+    }
+
+    .json-section-body {
+      padding: 14px;
+      display: block;
+    }
+
+    .json-section-meta {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 400;
+    }
+
+    .json-raw {
+      min-height: 0;
+      max-height: 360px;
+      font-size: 0.8rem;
+    }
+
+    .json-editor {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fffdfa;
+      overflow: auto;
+      padding: 10px 0;
+      font-family: "Cascadia Code", Consolas, monospace;
+      font-size: 0.86rem;
+      line-height: 1.45;
+    }
+
+    .json-line,
+    .json-summary-line {
+      display: grid;
+      grid-template-columns: 44px 18px minmax(0, 1fr);
+      align-items: start;
+      gap: 8px;
+      padding: 0 14px 0 0;
+      min-height: 1.45em;
+    }
+
+    .json-summary-line {
+      list-style: none;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .json-summary-line::-webkit-details-marker {
+      display: none;
+    }
+
+    .json-line-number {
+      color: #7f766a;
+      text-align: right;
+      padding-right: 4px;
+      user-select: none;
+    }
+
+    .json-gutter {
+      color: #8a7f71;
+      width: 14px;
+      text-align: center;
+      user-select: none;
+      transition: transform 120ms ease;
+      transform-origin: 50% 45%;
+    }
+
+    .json-gutter.blank {
+      opacity: 0;
+    }
+
+    .json-code-line {
+      white-space: pre;
+      min-width: 0;
+      padding-left: calc(var(--depth, 0) * 18px);
+      overflow-wrap: anywhere;
+    }
+
+    .json-fold {
+      display: block;
+    }
+
+    .json-fold[open] > .json-summary-line .json-gutter {
+      transform: rotate(90deg);
+    }
+
+    .json-fold > .json-summary-line .when-open {
+      display: none;
+    }
+
+    .json-fold[open] > .json-summary-line .when-open {
+      display: inline;
+    }
+
+    .json-fold[open] > .json-summary-line .when-closed {
+      display: none;
+    }
+
+    .json-children {
+      display: block;
+    }
+
+    .json-token.key {
+      color: #a53d2f;
+    }
+
+    .json-token.string {
+      color: #245db8;
+    }
+
+    .json-token.number {
+      color: #1d6a3a;
+    }
+
+    .json-token.boolean {
+      color: #1d6a3a;
+      font-weight: 600;
+    }
+
+    .json-token.null {
+      color: #7a7267;
+      font-style: italic;
+    }
+
+    .json-token.punct,
+    .json-token.brace {
+      color: #544c43;
+    }
+
+    .json-token.ellipsis {
+      color: #7f766a;
     }
 
     .empty {
@@ -368,13 +535,12 @@
       <section class="panel">
         <div class="panel-head">
           <div>
-            <h2>Session And Pull Result</h2>
-            <p>The DEZI session is shown first. The raw sender pull output appears below after a task is fetched.</p>
+            <h2>DEZI Session</h2>
+            <p>The DEZI session and claims for the current operator are shown here.</p>
           </div>
         </div>
         <div class="panel-body">
           <div class="identity" id="identity"></div>
-          <pre id="result-view">Select a task and pull the sender data.</pre>
         </div>
       </section>
     </div>
@@ -385,20 +551,294 @@
     const taskCount = document.getElementById("task-count");
     const statusBadges = document.getElementById("status-badges");
     const identity = document.getElementById("identity");
-    const resultView = document.getElementById("result-view");
     const refreshButton = document.getElementById("refresh-button");
     const loginButton = document.getElementById("login-button");
     const logoutButton = document.getElementById("logout-button");
     const targetTaskId = new URLSearchParams(window.location.search).get("task_id");
 
     let currentState = null;
+    const taskPullResults = {};
 
     function prettyJson(value) {
       return JSON.stringify(value, null, 2);
     }
 
-    function setResult(value) {
-      resultView.textContent = typeof value === "string" ? value : prettyJson(value);
+    function isObjectLike(value) {
+      return value !== null && typeof value === "object";
+    }
+
+    function formatPreview(value) {
+      if (Array.isArray(value)) {
+        return `${value.length} item${value.length === 1 ? "" : "s"}`;
+      }
+      if (isObjectLike(value)) {
+        const keys = Object.keys(value);
+        if (!keys.length) {
+          return "empty";
+        }
+        const head = keys.slice(0, 3).join(", ");
+        return `${keys.length} key${keys.length === 1 ? "" : "s"}${head ? `: ${head}` : ""}`;
+      }
+      if (typeof value === "string") {
+        if (!value.length) {
+          return '""';
+        }
+        const preview = value.length > 88 ? `${value.slice(0, 88)}...` : value;
+        return JSON.stringify(preview);
+      }
+      if (typeof value === "number" || typeof value === "boolean") {
+        return String(value);
+      }
+      if (value === null) {
+        return "null";
+      }
+      return String(value);
+    }
+
+    function appendToken(parent, className, text) {
+      const span = document.createElement("span");
+      span.className = `json-token ${className}`;
+      span.textContent = text;
+      parent.appendChild(span);
+    }
+
+    function appendKeyPrefix(parent, key) {
+      if (key === null || key === undefined) {
+        return;
+      }
+      appendToken(parent, "key", JSON.stringify(String(key)));
+      appendToken(parent, "punct", ": ");
+    }
+
+    function appendPrimitiveValue(parent, value) {
+      if (typeof value === "string") {
+        appendToken(parent, "string", JSON.stringify(value));
+        return;
+      }
+      if (typeof value === "number") {
+        appendToken(parent, "number", String(value));
+        return;
+      }
+      if (typeof value === "boolean") {
+        appendToken(parent, "boolean", String(value));
+        return;
+      }
+      if (value === null) {
+        appendToken(parent, "null", "null");
+        return;
+      }
+      appendToken(parent, "string", JSON.stringify(String(value)));
+    }
+
+    function createLineShell(tagName, lineNumber, depth, collapsible) {
+      const line = document.createElement(tagName);
+      line.className = tagName === "summary" ? "json-summary-line" : "json-line";
+
+      const lineNumberEl = document.createElement("span");
+      lineNumberEl.className = "json-line-number";
+      lineNumberEl.textContent = String(lineNumber);
+      line.appendChild(lineNumberEl);
+
+      const gutter = document.createElement("span");
+      gutter.className = `json-gutter${collapsible ? "" : " blank"}`;
+      gutter.textContent = collapsible ? "▸" : "•";
+      line.appendChild(gutter);
+
+      const code = document.createElement("span");
+      code.className = "json-code-line";
+      code.style.setProperty("--depth", String(depth));
+      line.appendChild(code);
+
+      return { line, code };
+    }
+
+    function createPrimitiveLine(lineNumber, depth, key, value, isLast) {
+      const { line, code } = createLineShell("div", lineNumber, depth, false);
+      appendKeyPrefix(code, key);
+      appendPrimitiveValue(code, value);
+      if (!isLast) {
+        appendToken(code, "punct", ",");
+      }
+      return line;
+    }
+
+    function createEmptyStructureLine(lineNumber, depth, key, isArray, isLast) {
+      const { line, code } = createLineShell("div", lineNumber, depth, false);
+      appendKeyPrefix(code, key);
+      appendToken(code, "brace", isArray ? "[]" : "{}");
+      if (!isLast) {
+        appendToken(code, "punct", ",");
+      }
+      return line;
+    }
+
+    function createClosingLine(lineNumber, depth, isArray, isLast) {
+      const { line, code } = createLineShell("div", lineNumber, depth, false);
+      appendToken(code, "brace", isArray ? "]" : "}");
+      if (!isLast) {
+        appendToken(code, "punct", ",");
+      }
+      return line;
+    }
+
+    function createFoldSummary(lineNumber, depth, key, isArray, isLast) {
+      const { line, code } = createLineShell("summary", lineNumber, depth, true);
+
+      const openSpan = document.createElement("span");
+      openSpan.className = "when-open";
+      appendKeyPrefix(openSpan, key);
+      appendToken(openSpan, "brace", isArray ? "[" : "{");
+
+      const closedSpan = document.createElement("span");
+      closedSpan.className = "when-closed";
+      appendKeyPrefix(closedSpan, key);
+      appendToken(closedSpan, "brace", isArray ? "[" : "{");
+      appendToken(closedSpan, "ellipsis", "...");
+      appendToken(closedSpan, "brace", isArray ? "]" : "}");
+      if (!isLast) {
+        appendToken(closedSpan, "punct", ",");
+      }
+
+      code.appendChild(openSpan);
+      code.appendChild(closedSpan);
+      return line;
+    }
+
+    function appendJsonValue(parent, value, depth, key, isLast, state) {
+      if (!isObjectLike(value)) {
+        parent.appendChild(createPrimitiveLine(state.line++, depth, key, value, isLast));
+        return;
+      }
+
+      const isArray = Array.isArray(value);
+      const entries = isArray ? value.map((item, index) => [index, item]) : Object.entries(value);
+      if (!entries.length) {
+        parent.appendChild(createEmptyStructureLine(state.line++, depth, key, isArray, isLast));
+        return;
+      }
+
+      const details = document.createElement("details");
+      details.className = "json-fold";
+      details.open = true;
+      details.appendChild(createFoldSummary(state.line++, depth, key, isArray, isLast));
+
+      const body = document.createElement("div");
+      body.className = "json-children";
+      entries.forEach(([childKey, childValue], index) => {
+        appendJsonValue(body, childValue, depth + 1, isArray ? null : childKey, index === entries.length - 1, state);
+      });
+      body.appendChild(createClosingLine(state.line++, depth, isArray, isLast));
+      details.appendChild(body);
+      parent.appendChild(details);
+    }
+
+    function createJsonEditor(value) {
+      const editor = document.createElement("div");
+      editor.className = "json-editor";
+      const state = { line: 1 };
+      const root = typeof value === "string" ? { value } : value;
+      appendJsonValue(editor, root, 0, null, true, state);
+      return editor;
+    }
+
+    function createJsonSection(title, value, options = {}) {
+      const details = document.createElement("details");
+      details.className = "json-section";
+      details.open = options.open !== false;
+
+      const summary = document.createElement("summary");
+      const titleEl = document.createElement("span");
+      titleEl.textContent = title;
+      summary.appendChild(titleEl);
+
+      const meta = document.createElement("span");
+      meta.className = "json-section-meta";
+      meta.textContent = formatPreview(value);
+      summary.appendChild(meta);
+      details.appendChild(summary);
+
+      const body = document.createElement("div");
+      body.className = "json-section-body";
+      body.appendChild(createJsonEditor(value));
+      details.appendChild(body);
+      return details;
+    }
+
+    function createResultSections(value) {
+      const fragment = document.createDocumentFragment();
+
+      if (typeof value === "string") {
+        fragment.appendChild(createJsonSection("Status", { message: value }));
+        return fragment;
+      }
+
+      if (!isObjectLike(value)) {
+        fragment.appendChild(createJsonSection("Result", { value }));
+        return fragment;
+      }
+
+      if (value.resourceType === "Task") {
+        fragment.appendChild(createJsonSection("Stored Task", value));
+        return fragment;
+      }
+
+      const looksLikePullResponse =
+        "notification_summary" in value ||
+        "dezi_identity" in value ||
+        "sender_access_token" in value ||
+        "pulls" in value;
+
+      if (!looksLikePullResponse) {
+        fragment.appendChild(createJsonSection("JSON", value));
+        return fragment;
+      }
+
+      const sections = [];
+      if (value.notification_summary !== undefined) {
+        sections.push(["Notification Summary", value.notification_summary, true]);
+      }
+      if (value.dezi_identity !== undefined) {
+        sections.push(["DEZI Identity", value.dezi_identity, true]);
+      }
+      if (value.sender_access_token !== undefined) {
+        sections.push(["Sender Access Token", value.sender_access_token, true]);
+      }
+      if (value.sender !== undefined) {
+        sections.push(["Sender", value.sender, false]);
+      }
+      const pulls = isObjectLike(value.pulls) ? value.pulls : {};
+      const workflowTaskPull = Object.prototype.hasOwnProperty.call(pulls, "workflow_task") ? pulls.workflow_task : undefined;
+      const bgzKeyLabels = {
+        patient: "Patient",
+        observations_lastn: "Observation/$lastn",
+        conditions: "Condition",
+        allergies: "AllergyIntolerance",
+        medications: "MedicationStatement",
+        documents: "DocumentReference",
+      };
+      const bgzPulls = {};
+
+      Object.entries(pulls).forEach(([key, pullValue]) => {
+        if (key === "workflow_task") {
+          return;
+        }
+        bgzPulls[bgzKeyLabels[key] || key] = pullValue;
+      });
+
+      if (workflowTaskPull !== undefined) {
+        sections.push(["Pull", { workflow_task: workflowTaskPull }, true]);
+      } else if (value.pulls !== undefined && !Object.keys(bgzPulls).length) {
+        sections.push(["Pull", value.pulls, true]);
+      }
+
+      if (Object.keys(bgzPulls).length) {
+        sections.push(["BgZ", bgzPulls, true]);
+      }
+
+      sections.forEach(([title, sectionValue, open]) => {
+        fragment.appendChild(createJsonSection(title, sectionValue, { open }));
+      });
+      return fragment;
     }
 
     function makeBadge(label, klass) {
@@ -406,20 +846,6 @@
       span.className = `badge ${klass || ""}`.trim();
       span.textContent = label;
       return span;
-    }
-
-    function appendTextBlock(parent, title, text) {
-      const block = document.createElement("div");
-      block.className = "identity-block";
-      block.innerHTML = `<h3>${title}</h3>`;
-      const pre = document.createElement("pre");
-      pre.textContent = text;
-      block.appendChild(pre);
-      parent.appendChild(block);
-    }
-
-    function appendJsonBlock(parent, title, value) {
-      appendTextBlock(parent, title, prettyJson(value));
     }
 
     function renderStatus(state) {
@@ -435,29 +861,23 @@
 
     function renderIdentity(state) {
       identity.replaceChildren();
+      const sessionSummary = {
+        logged_in: state.dezi.logged_in,
+        logged_in_at: state.dezi.logged_in_at || null,
+        dezi_client_id: state.service.dezi_client_id,
+        dezi_callback_url: state.service.dezi_callback_url,
+      };
+      identity.appendChild(createJsonSection("DEZI Session", sessionSummary));
+      identity.appendChild(createJsonSection("DEZI Identity", state.dezi.identity || {}));
 
-      const intro = document.createElement("div");
-      intro.className = "identity-block";
-      intro.innerHTML = state.dezi.logged_in
-        ? `<h3>DEZI Session</h3><p><strong>${state.dezi.identity.display_name || "Unknown user"}</strong><br>${state.dezi.identity.organization_name || "-"} (${state.dezi.identity.organization_ura || "-"})<br>Roles: ${(state.dezi.identity.roles || []).join(", ") || "-"}</p>`
-        : `<h3>DEZI Session</h3><p>No active DEZI session. Use the login button before pulling sender data.</p>`;
-      identity.appendChild(intro);
-
-      const details = document.createElement("div");
-      details.className = "identity-block";
-      details.innerHTML = `<h3>Session Metadata</h3><p>Client ID: ${state.service.dezi_client_id}<br>Callback: ${state.service.dezi_callback_url}<br>Logged in at: ${state.dezi.logged_in_at || "-"}</p>`;
-      identity.appendChild(details);
-
-      if (state.dezi.logged_in) {
-        if (state.dezi.claims && Object.keys(state.dezi.claims).length) {
-          appendJsonBlock(identity, "DEZI VC Claims", state.dezi.claims);
-        }
-        if (state.dezi.userinfo_jwt) {
-          appendTextBlock(identity, "DEZI VC JWT", state.dezi.userinfo_jwt);
-        }
-        if (state.dezi.id_token) {
-          appendTextBlock(identity, "DEZI id_token", state.dezi.id_token);
-        }
+      if (state.dezi.logged_in && state.dezi.claims && Object.keys(state.dezi.claims).length) {
+        identity.appendChild(createJsonSection("DEZI VC Claims", state.dezi.claims, { open: true }));
+      }
+      if (state.dezi.logged_in && state.dezi.userinfo_jwt) {
+        identity.appendChild(createJsonSection("DEZI VC JWT", state.dezi.userinfo_jwt, { open: true }));
+      }
+      if (state.dezi.logged_in && state.dezi.id_token) {
+        identity.appendChild(createJsonSection("DEZI id_token", state.dezi.id_token, { open: true }));
       }
     }
 
@@ -515,6 +935,19 @@
       const actions = document.createElement("div");
       actions.className = "task-actions";
 
+      const taskResult = document.createElement("div");
+      taskResult.className = "task-result";
+      const taskResultId = task.summary.id || "";
+      const showTaskResult = (value) => {
+        taskPullResults[taskResultId] = value;
+        taskResult.classList.add("visible");
+        taskResult.replaceChildren(createResultSections(value));
+      };
+      const storedResult = taskPullResults[taskResultId];
+      if (storedResult !== undefined) {
+        showTaskResult(storedResult);
+      }
+
       const loginLink = document.createElement("a");
       loginLink.className = "link-button secondary";
       loginLink.href = loginHref(task.summary.id || "");
@@ -528,7 +961,7 @@
       pullButton.disabled = !currentState.dezi.logged_in;
       pullButton.addEventListener("click", async () => {
         pullButton.disabled = true;
-        setResult("Pull in progress...");
+        showTaskResult("Pull in progress...");
         try {
           const response = await fetch(`ui/tasks/${encodeURIComponent(task.summary.id)}/pull`, {
             method: "POST",
@@ -537,13 +970,12 @@
             }
           });
           const payload = await response.json();
+          showTaskResult(payload);
           if (!response.ok) {
-            setResult(payload);
             return;
           }
-          setResult(payload);
         } catch (error) {
-          setResult({ error: String(error) });
+          showTaskResult({ error: String(error) });
         } finally {
           pullButton.disabled = !currentState.dezi.logged_in;
         }
@@ -554,10 +986,12 @@
       resourceButton.type = "button";
       resourceButton.className = "secondary";
       resourceButton.textContent = "Show Stored Task";
-      resourceButton.addEventListener("click", () => setResult(task.resource));
+      resourceButton.addEventListener("click", () => showTaskResult(task.resource));
       actions.appendChild(resourceButton);
 
       article.appendChild(actions);
+      article.appendChild(taskResult);
+
       return article;
     }
 
@@ -593,7 +1027,7 @@
         renderTasks(currentState);
         updateLoginButtons();
       } catch (error) {
-        setResult({ error: String(error) });
+        console.error(error);
       } finally {
         refreshButton.disabled = false;
       }
@@ -610,10 +1044,9 @@
           method: "POST",
           headers: { "Accept": "application/json" }
         });
-        setResult("DEZI session cleared.");
         await loadState();
       } catch (error) {
-        setResult({ error: String(error) });
+        console.error(error);
       } finally {
         logoutButton.disabled = false;
       }

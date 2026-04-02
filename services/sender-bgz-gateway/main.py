@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
+from urllib.parse import urlsplit
 
 import httpx
 import uvicorn
@@ -47,6 +48,7 @@ ALLOWED_DATA_RESOURCES = {
     "DocumentReference",
     "Binary",
 }
+AUTHORIZATION_BASE_HEADER = "X-Authorization-Base"
 TERMINAL_TASK_STATUSES = {
     "cancelled",
     "canceled",
@@ -214,6 +216,7 @@ class TokenContext:
     employee_roles: list[str]
     scopes: list[str]
     authorization_base: str
+    subject_id: str = ""
 
 
 @dataclass
@@ -239,11 +242,27 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
         _first_non_empty(
             data,
             ("employee_roles",),
+            ("roles",),
+            ("roleName",),
+            ("role_name",),
+            ("user_role",),
             ("claims", "employee_roles"),
+            ("claims", "roles"),
+            ("claims", "roleName"),
+            ("claims", "role_name"),
             ("subject", "properties", "subject_role"),
             ("subject", "properties", "employee_roles"),
+            ("subject", "properties", "roles"),
+            ("subject", "properties", "roleName"),
+            ("subject", "properties", "role_name"),
+            ("employee", "roleName"),
         )
     )
+    if not roles:
+        for relation in data.get("relations") or []:
+            if not isinstance(relation, dict):
+                continue
+            roles.extend(_string_list(relation.get("roles")))
     scopes = _string_list(
         _first_non_empty(
             data,
@@ -271,8 +290,26 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
             _first_non_empty(
                 data,
                 ("employee_identifier",),
+                ("Dezi_id",),
+                ("dezi_id",),
+                ("uzi_id",),
+                ("uziNumber",),
+                ("username",),
+                ("identifier",),
                 ("claims", "employee_identifier"),
+                ("claims", "Dezi_id"),
+                ("claims", "dezi_id"),
+                ("claims", "uzi_id"),
+                ("claims", "uziNumber"),
+                ("claims", "username"),
+                ("claims", "identifier"),
                 ("subject", "properties", "subject_id"),
+                ("subject", "properties", "Dezi_id"),
+                ("subject", "properties", "dezi_id"),
+                ("subject", "properties", "uzi_id"),
+                ("subject", "properties", "uziNumber"),
+                ("subject", "properties", "identifier"),
+                ("subject", "properties", "username"),
                 ("employee", "identifier"),
             )
             or ""
@@ -291,6 +328,13 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
             )
             or ""
         ).strip(),
+        subject_id=_extract_oauth_subject_id(
+            _first_non_empty(
+                data,
+                ("client_id",),
+                ("iss",),
+            )
+        ),
     )
 
 
@@ -308,6 +352,25 @@ def _extract_task_patient_bsn(task: dict[str, Any]) -> str:
     if system and system != settings.patient_identifier_system:
         logger.warning("Unexpected patient identifier system on workflow task: %s", system)
     return value
+
+
+def _extract_oauth_subject_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        path = urlsplit(raw).path
+    except Exception:
+        path = raw
+    parts = [part for part in str(path or "").split("/") if part]
+    for index, part in enumerate(parts):
+        if part == "oauth2" and index + 1 < len(parts):
+            return str(parts[index + 1] or "").strip()
+    return ""
+
+
+def _request_authorization_base(request: Request) -> str:
+    return str(request.headers.get(AUTHORIZATION_BASE_HEADER) or "").strip()
 
 
 def _task_has_authorization_base(task: dict[str, Any], authorization_base: str) -> bool:
@@ -564,8 +627,6 @@ async def _introspect_token(token: str) -> TokenContext:
         _raise_http(401, "inactive_token", "Toegangstoken is niet actief of niet geldig.")
     if not ctx.organization_ura:
         _raise_http(403, "missing_organization_ura", "Introspectie mist organization_ura.")
-    if not ctx.authorization_base:
-        _raise_http(403, "missing_authorization_base", "Introspectie mist authorization-base claim.")
     return ctx
 
 
@@ -578,6 +639,19 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
         _raise_http(401, "missing_bearer_token", "Bearer token ontbreekt.")
 
     token_ctx = await _introspect_token(token)
+    request_authorization_base = _request_authorization_base(request)
+    if token_ctx.authorization_base and request_authorization_base and request_authorization_base != token_ctx.authorization_base:
+        _raise_http(
+            403,
+            "authorization_base_mismatch",
+            "Authorization-base header matcht niet met de claim uit de token introspectie.",
+            token_authorization_base=token_ctx.authorization_base,
+            request_authorization_base=request_authorization_base,
+        )
+    if not token_ctx.authorization_base:
+        if not request_authorization_base:
+            _raise_http(403, "missing_authorization_base", "Introspectie mist authorization-base claim.")
+        token_ctx.authorization_base = request_authorization_base
     if require_professional:
         if not token_ctx.employee_identifier:
             _raise_http(403, "missing_employee_identifier", "Introspectie mist employee_identifier.")
@@ -618,12 +692,13 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
         _raise_http(409, "workflow_task_not_unique", "Meerdere workflow tasks gevonden voor authorization-base.")
     task = tasks[0]
     task_owner_ura = _extract_task_owner_ura(task)
-    if not task_owner_ura or task_owner_ura != token_ctx.organization_ura:
+    if not task_owner_ura or task_owner_ura not in {token_ctx.organization_ura, token_ctx.subject_id}:
         _raise_http(
             403,
             "organization_not_authorized",
             "organization_ura uit introspectie matcht niet met de workflow task owner.",
             token_organization_ura=token_ctx.organization_ura,
+            token_subject_id=token_ctx.subject_id or None,
             task_owner_ura=task_owner_ura or None,
         )
     if require_active_task and not _task_is_active(task):

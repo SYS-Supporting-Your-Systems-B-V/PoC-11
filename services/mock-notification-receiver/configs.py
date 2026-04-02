@@ -24,16 +24,16 @@ class Settings(BaseSettings):
     require_bearer_token: bool = Field(True, validation_alias="MOCK_RECEIVER_REQUIRE_BEARER_TOKEN")
     nuts_internal_base: str = Field("http://nuts-node:8083", validation_alias="MOCK_RECEIVER_NUTS_INTERNAL_BASE")
     introspection_timeout: float = Field(10.0, validation_alias="MOCK_RECEIVER_INTROSPECTION_TIMEOUT")
-    required_scope: str = Field("eOverdracht-receiver", validation_alias="MOCK_RECEIVER_REQUIRED_SCOPE")
+    required_incoming_scope: str = Field("eOverdracht-receiver", validation_alias="MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE")
     outbound_verify_tls: bool = Field(False, validation_alias="MOCK_RECEIVER_OUTBOUND_VERIFY_TLS")
     outbound_ca_certs_file: Optional[str] = Field(None, validation_alias="MOCK_RECEIVER_OUTBOUND_CA_CERTS_FILE")
     directory_fhir_base: str = Field(
-        "http://hapi-directory:8080/fhir",
+        "http://hapi-update-client:8081/fhir",
         validation_alias="MOCK_RECEIVER_DIRECTORY_FHIR_BASE",
     )
     receiver_organization_ura: str = Field("87654321", validation_alias="MOCK_RECEIVER_ORGANIZATION_URA")
     receiver_nuts_subject_id: Optional[str] = Field(None, validation_alias="MOCK_RECEIVER_NUTS_SUBJECT_ID")
-    sender_data_scope: Optional[str] = Field(None, validation_alias="MOCK_RECEIVER_SENDER_DATA_SCOPE")
+    sender_data_scope: str = Field("eOverdracht-sender", validation_alias="MOCK_RECEIVER_SENDER_DATA_SCOPE")
     sender_token_timeout: float = Field(10.0, validation_alias="MOCK_RECEIVER_SENDER_TOKEN_TIMEOUT")
     session_cookie_name: str = Field("mock_receiver_session", validation_alias="MOCK_RECEIVER_SESSION_COOKIE_NAME")
     session_cookie_secure: bool = Field(True, validation_alias="MOCK_RECEIVER_SESSION_COOKIE_SECURE")

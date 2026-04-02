@@ -248,6 +248,157 @@ def test_task_read_authorized(monkeypatch):
     ]
 
 
+def test_task_read_accepts_authorization_base_header_fallback(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload(**{"authorization-base": ""})),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+    fake.queue("GET", "http://upstream/fhir/Task/wf-1", DummyResponse(200, _workflow_task(appmod)))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get(
+            "/fhir/Task/wf-1",
+            headers={**_auth_headers(), "X-Authorization-Base": "auth-123"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert fake.calls[1]["params"] == [
+        ("identifier", "https://sys.local/fhir/NamingSystem/task-authorization-base|auth-123"),
+        ("_count", "5"),
+    ]
+
+
+def test_task_read_accepts_subject_id_fallback_for_organization(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(
+            200,
+            _introspection_payload(
+                organization_ura="00000000",
+                iss="https://sender.example/nuts-oauth2/oauth2/87654321",
+            ),
+        ),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+    fake.queue("GET", "http://upstream/fhir/Task/wf-1", DummyResponse(200, _workflow_task(appmod)))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Task/wf-1", headers=_auth_headers())
+
+    assert response.status_code == 200, response.text
+
+
+def test_task_read_rejects_authorization_base_header_mismatch(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload(**{"authorization-base": "auth-123"})),
+    )
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get(
+            "/fhir/Task/wf-1",
+            headers={**_auth_headers(), "X-Authorization-Base": "auth-999"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "authorization_base_mismatch"
+
+
+def test_patient_search_requires_employee_claims_from_introspection(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload(employee_identifier="", employee_roles=[])),
+    )
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get(
+            "/fhir/Patient",
+            headers={**_auth_headers(), "X-Employee-Identifier": "dezi-001", "X-Employee-Roles": "doctor"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "missing_employee_identifier"
+
+
+def test_patient_search_accepts_legacy_employeeid_claim_names(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(
+            200,
+            _introspection_payload(
+                employee_identifier="",
+                employee_roles=[],
+                username="dezi-001",
+                roleName="doctor",
+            ),
+        ),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Patient", headers=_auth_headers())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+
+
+def test_patient_search_accepts_raw_dezi_claim_names(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(
+            200,
+            _introspection_payload(
+                employee_identifier="",
+                employee_roles=[],
+                dezi_id="dezi-001",
+                relations=[{"roles": ["doctor"]}],
+            ),
+        ),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Patient", headers=_auth_headers())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+
+
 def test_patient_search_scopes_to_authorized_patient_and_keeps_include(monkeypatch):
     appmod = _import_app_module()
     _set_gateway_settings(monkeypatch, appmod)

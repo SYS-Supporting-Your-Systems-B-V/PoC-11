@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Optional
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 import uvicorn
@@ -38,6 +38,7 @@ FHIR_JSON_CONTENT_TYPES = (
 SESSION_COOKIE_DEFAULT_PATH = "/"
 SESSION_EXPIRY_SECONDS = 8 * 60 * 60
 TASK_EXT_SENDER_BGZ_BASE_URL = "http://example.org/fhir/StructureDefinition/sender-bgz-base"
+SENDER_AUTHORIZATION_BASE_HEADER = "X-Authorization-Base"
 URA_IDENTIFIER_SYSTEM = "http://fhir.nl/fhir/NamingSystem/ura"
 BGZ_SERVER_CAPABILITY_CODE = "http://nictiz.nl/fhir/CapabilityStatement/bgz2017-servercapabilities"
 NUTS_OAUTH_CAPABILITY_CODE = "Nuts-OAuth"
@@ -230,6 +231,14 @@ def _endpoint_matches_capability(endpoint: dict[str, Any], code: str) -> bool:
         token = f"{item_system}|{item_code}" if item_system and item_code else item_code
         if item_code == expected or token == expected:
             return True
+        for coding in payload_type.get("coding") or []:
+            if not isinstance(coding, dict):
+                continue
+            item_code = str(coding.get("code") or "").strip()
+            item_system = str(coding.get("system") or "").strip()
+            token = f"{item_system}|{item_code}" if item_system and item_code else item_code
+            if item_code == expected or token == expected:
+                return True
     return False
 
 
@@ -270,6 +279,18 @@ def _extract_task_owner_ura(task: dict[str, Any]) -> Optional[str]:
     identifier = owner.get("identifier") or {}
     value = str(identifier.get("value") or "").strip()
     return value or None
+
+
+def _sender_authorization_server_url(sender_oauth_endpoint: str, sender_ura: str) -> str:
+    auth_server_base = _normalize_base(sender_oauth_endpoint)
+    if not auth_server_base:
+        return ""
+    remote_subject_id = str(sender_ura or "").strip()
+    if not remote_subject_id:
+        return auth_server_base
+    if "/oauth2/" in urlsplit(auth_server_base).path:
+        return auth_server_base
+    return f"{auth_server_base}/oauth2/{quote(remote_subject_id, safe='')}"
 
 
 def _extract_task_patient_bsn(task: dict[str, Any]) -> Optional[str]:
@@ -347,6 +368,22 @@ class TokenContext:
     active: bool
     organization_ura: str
     scopes: list[str]
+    subject_id: str = ""
+
+
+def _extract_oauth_subject_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        path = urlsplit(raw).path
+    except Exception:
+        path = raw
+    parts = [part for part in str(path or "").split("/") if part]
+    for index, part in enumerate(parts):
+        if part == "oauth2" and index + 1 < len(parts):
+            return str(parts[index + 1] or "").strip()
+    return ""
 
 
 def _extract_token_context(data: dict[str, Any]) -> TokenContext:
@@ -364,6 +401,13 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
             )
             or ""
         ).strip(),
+        subject_id=_extract_oauth_subject_id(
+            _first_non_empty(
+                data,
+                ("client_id",),
+                ("iss",),
+            )
+        ),
         scopes=_string_list(
             _first_non_empty(
                 data,
@@ -376,7 +420,7 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
     )
 
 
-async def _introspect_token(token: str) -> TokenContext:
+async def _introspect_access_token_payload(token: str) -> dict[str, Any]:
     url = _join_url(settings.nuts_internal_base, "/internal/auth/v2/accesstoken/introspect")
     try:
         response = await app.state.http_client.post(
@@ -404,6 +448,11 @@ async def _introspect_token(token: str) -> TokenContext:
         _raise_http(502, "introspection_invalid_json", "Nuts token introspection gaf geen geldige JSON terug.", error=str(exc))
     if not isinstance(payload, dict):
         _raise_http(502, "introspection_invalid_json", "Nuts token introspection gaf geen JSON object terug.")
+    return payload
+
+
+async def _introspect_token(token: str) -> TokenContext:
+    payload = await _introspect_access_token_payload(token)
 
     ctx = _extract_token_context(payload)
     if not ctx.active:
@@ -411,7 +460,7 @@ async def _introspect_token(token: str) -> TokenContext:
     if not ctx.organization_ura:
         _raise_http(403, "missing_organization_ura", "Introspectie mist organization_ura.")
 
-    required_scope = str(settings.required_scope or "").strip()
+    required_scope = str(settings.required_incoming_scope or "").strip()
     if required_scope and required_scope not in set(ctx.scopes):
         _raise_http(
             403,
@@ -442,12 +491,13 @@ async def _authorize_notification_request(request: Request, task: dict[str, Any]
             "missing_task_sender_ura",
             "Notification Task mist requester.onBehalfOf.identifier.value (sender URA).",
         )
-    if token_ctx.organization_ura != task_sender_ura:
+    if token_ctx.organization_ura != task_sender_ura and token_ctx.subject_id != task_sender_ura:
         _raise_http(
             403,
             "organization_not_authorized",
             "organization_ura uit introspectie matcht niet met de sender URA in de notification Task.",
             token_organization_ura=token_ctx.organization_ura,
+            token_subject_id=token_ctx.subject_id or None,
             task_sender_ura=task_sender_ura,
         )
 
@@ -1099,7 +1149,181 @@ async def _discover_sender_endpoints(sender_ura: str) -> dict[str, Any]:
     }
 
 
-async def _request_sender_access_token(*, task: dict[str, Any], dezi_id_token: str, sender_oauth_endpoint: str) -> dict[str, Any]:
+def _extract_employee_identifier_from_introspection(data: dict[str, Any]) -> str:
+    return str(
+        _first_non_empty(
+            data,
+            ("employee_identifier",),
+            ("Dezi_id",),
+            ("dezi_id",),
+            ("uzi_id",),
+            ("uziNumber",),
+            ("username",),
+            ("identifier",),
+            ("claims", "employee_identifier"),
+            ("claims", "Dezi_id"),
+            ("claims", "dezi_id"),
+            ("claims", "uzi_id"),
+            ("claims", "uziNumber"),
+            ("claims", "username"),
+            ("claims", "identifier"),
+            ("subject", "properties", "subject_id"),
+            ("subject", "properties", "Dezi_id"),
+            ("subject", "properties", "dezi_id"),
+            ("subject", "properties", "uzi_id"),
+            ("subject", "properties", "uziNumber"),
+            ("subject", "properties", "identifier"),
+            ("subject", "properties", "username"),
+            ("employee", "identifier"),
+        )
+        or ""
+    ).strip()
+
+
+def _extract_employee_roles_from_introspection(data: dict[str, Any]) -> list[str]:
+    roles = _string_list(
+        _first_non_empty(
+            data,
+            ("employee_roles",),
+            ("roles",),
+            ("roleName",),
+            ("role_name",),
+            ("user_role",),
+            ("claims", "employee_roles"),
+            ("claims", "roles"),
+            ("claims", "roleName"),
+            ("claims", "role_name"),
+            ("subject", "properties", "subject_role"),
+            ("subject", "properties", "employee_roles"),
+            ("subject", "properties", "roles"),
+            ("subject", "properties", "roleName"),
+            ("subject", "properties", "role_name"),
+            ("employee", "roleName"),
+        )
+    )
+    if not roles:
+        for relation in data.get("relations") or []:
+            if not isinstance(relation, dict):
+                continue
+            roles.extend(_string_list(relation.get("roles")))
+    seen: set[str] = set()
+    unique_roles: list[str] = []
+    for role in roles:
+        if role in seen:
+            continue
+        seen.add(role)
+        unique_roles.append(role)
+    return unique_roles
+
+
+def _sender_access_token_summary(token_payload: dict[str, Any], introspection: dict[str, Any], source: str) -> dict[str, Any]:
+    employee_identifier = _extract_employee_identifier_from_introspection(introspection)
+    employee_roles = _extract_employee_roles_from_introspection(introspection)
+    return {
+        "source": source,
+        "token_type": str(token_payload.get("token_type") or "").strip() or None,
+        "scope": str(token_payload.get("scope") or "").strip() or None,
+        "expires_in": token_payload.get("expires_in"),
+        "organization_ura": str(
+            _first_non_empty(
+                introspection,
+                ("organization_ura",),
+                ("claims", "organization_ura"),
+                ("subject_organization_id",),
+                ("subject", "properties", "subject_organization_id"),
+                ("organization", "ura"),
+            )
+            or ""
+        ).strip()
+        or None,
+        "subject_id": _extract_oauth_subject_id(_first_non_empty(introspection, ("client_id",), ("iss",))) or None,
+        "employee_identifier": employee_identifier or None,
+        "employee_identifier_present": bool(employee_identifier),
+        "employee_roles": employee_roles,
+        "employee_roles_present": bool(employee_roles),
+        "introspection_raw": copy.deepcopy(introspection),
+    }
+
+
+def _build_sender_additional_credentials(session: UserSession) -> list[dict[str, Any]]:
+    identity = session.dezi_identity if isinstance(session.dezi_identity, dict) else {}
+    employee_identifier = str(identity.get("employee_identifier") or "").strip()
+    roles = _string_list(identity.get("roles"))
+    display_name = str(identity.get("display_name") or "").strip()
+    if not employee_identifier:
+        return []
+
+    if not roles:
+        roles = [""]
+
+    credentials: list[dict[str, Any]] = []
+    for role in roles:
+        subject: dict[str, Any] = {"identifier": employee_identifier}
+        if display_name:
+            subject["name"] = display_name
+        role_value = str(role or "").strip()
+        if role_value:
+            subject["roleName"] = role_value
+        credentials.append(
+            {
+                "@context": [
+                    "https://www.w3.org/2018/credentials/v1",
+                    "https://nuts.nl/credentials/v1",
+                ],
+                "type": ["VerifiableCredential", "NutsEmployeeCredential"],
+                "credentialSubject": subject,
+            }
+        )
+    return credentials
+
+
+async def _select_sender_access_token(
+    *,
+    task: dict[str, Any],
+    sender_oauth_endpoint: str,
+    session: UserSession,
+) -> tuple[dict[str, Any], str, dict[str, Any], list[dict[str, Any]]]:
+    additional_credentials = _build_sender_additional_credentials(session)
+    if not additional_credentials:
+        _raise_http(401, "dezi_login_required", "Log eerst in via DEZI voordat je sender data kunt ophalen.")
+
+    chosen_token_payload: dict[str, Any] | None = None
+    chosen_access_token = ""
+    chosen_summary: dict[str, Any] | None = None
+    chosen_score: tuple[int, int, int] | None = None
+    evaluated: list[dict[str, Any]] = []
+
+    token_payload = await _request_sender_access_token(
+        task=task,
+        sender_oauth_endpoint=sender_oauth_endpoint,
+        additional_credentials=additional_credentials,
+    )
+    access_token = str(token_payload.get("access_token") or "").strip()
+    introspection = await _introspect_access_token_payload(access_token)
+    summary = _sender_access_token_summary(token_payload, introspection, "credentials")
+    evaluated.append(summary)
+    score = (
+        1 if summary["employee_identifier_present"] and summary["employee_roles_present"] else 0,
+        1 if summary["employee_identifier_present"] else 0,
+        1 if summary["employee_roles_present"] else 0,
+    )
+    if chosen_summary is None or score > (chosen_score or (0, 0, 0)):
+        chosen_token_payload = token_payload
+        chosen_access_token = access_token
+        chosen_summary = summary
+        chosen_score = score
+
+    assert chosen_token_payload is not None
+    assert chosen_summary is not None
+    return chosen_token_payload, chosen_access_token, chosen_summary, evaluated
+
+
+async def _request_sender_access_token(
+    *,
+    task: dict[str, Any],
+    sender_oauth_endpoint: str,
+    additional_credentials: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     subject_id = (
         str(settings.receiver_nuts_subject_id or "").strip()
         or str(_extract_task_owner_ura(task) or "").strip()
@@ -1113,11 +1337,13 @@ async def _request_sender_access_token(*, task: dict[str, Any], dezi_id_token: s
     payload: dict[str, Any] = {
         "authorization_server": sender_oauth_endpoint,
         "token_type": "Bearer",
-        "id_token": dezi_id_token,
     }
     scope = str(settings.sender_data_scope or "").strip()
-    if scope:
-        payload["scope"] = scope
+    if not scope:
+        _raise_http(500, "misconfigured", "Geen sender scope geconfigureerd voor de sender tokenaanvraag.")
+    payload["scope"] = scope
+    if additional_credentials:
+        payload["credentials"] = copy.deepcopy(additional_credentials)
     try:
         response = await app.state.http_client.post(
             request_url,
@@ -1146,15 +1372,25 @@ async def _request_sender_access_token(*, task: dict[str, Any], dezi_id_token: s
     return body
 
 
-async def _fetch_sender_path(sender_bgz_base: str, sender_access_token: str, relative_path: str) -> dict[str, Any]:
+async def _fetch_sender_path(
+    sender_bgz_base: str,
+    sender_access_token: str,
+    relative_path: str,
+    *,
+    authorization_base: str | None = None,
+) -> dict[str, Any]:
     url = _join_url(sender_bgz_base, relative_path)
+    headers = {
+        "Accept": "application/fhir+json, application/json",
+        "Authorization": f"Bearer {sender_access_token}",
+    }
+    auth_base = str(authorization_base or "").strip()
+    if auth_base:
+        headers[SENDER_AUTHORIZATION_BASE_HEADER] = auth_base
     try:
         response = await app.state.http_client.get(
             url,
-            headers={
-                "Accept": "application/fhir+json, application/json",
-                "Authorization": f"Bearer {sender_access_token}",
-            },
+            headers=headers,
         )
     except httpx.HTTPError as exc:
         return {
@@ -1180,30 +1416,32 @@ async def _fetch_sender_path(sender_bgz_base: str, sender_access_token: str, rel
 
 
 async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> dict[str, Any]:
-    dezi_id_token = str(session.dezi_id_token or "").strip()
-    if not dezi_id_token:
+    if not str(session.dezi_id_token or "").strip() and not str(session.dezi_userinfo_jwt or "").strip():
         _raise_http(401, "dezi_login_required", "Log eerst in via DEZI voordat je sender data kunt ophalen.")
+    if not str(((session.dezi_identity or {}).get("employee_identifier")) or "").strip():
+        _raise_http(401, "dezi_login_required", "DEZI sessie mist employee_identifier voor de sender tokenaanvraag.")
 
     sender_ura = _extract_task_sender_ura(task)
     sender_base_from_task = _extract_sender_bgz_base(task)
     workflow_task_ref = _extract_workflow_task_ref(task)
+    authorization_base = str(_extract_task_input_value(task, "authorization-base") or "").strip()
 
     discovery = await _discover_sender_endpoints(str(sender_ura or ""))
     sender_oauth_endpoint = str(((discovery.get("oauth_endpoint") or {}).get("address")) or "").strip()
     if not sender_oauth_endpoint:
         _raise_http(404, "sender_oauth_endpoint_missing", "Geen Nuts-OAuth endpoint gevonden voor de sender in de directory.", sender_ura=sender_ura)
+    sender_auth_server_url = _sender_authorization_server_url(sender_oauth_endpoint, str(sender_ura or ""))
 
     discovered_bgz_base = str(((discovery.get("bgz_endpoint") or {}).get("address")) or "").strip() or None
     sender_bgz_base = str(sender_base_from_task or "").strip() or str(discovered_bgz_base or "").strip()
     if not sender_bgz_base:
         _raise_http(404, "sender_bgz_base_missing", "Geen sender BgZ endpoint gevonden in de notification Task of directory.", sender_ura=sender_ura)
 
-    token_payload = await _request_sender_access_token(
+    token_payload, sender_access_token, selected_token_summary, evaluated_sender_tokens = await _select_sender_access_token(
         task=task,
-        dezi_id_token=dezi_id_token,
-        sender_oauth_endpoint=sender_oauth_endpoint,
+        sender_oauth_endpoint=sender_auth_server_url,
+        session=session,
     )
-    sender_access_token = str(token_payload.get("access_token") or "").strip()
 
     named_paths: list[tuple[str, str]] = []
     workflow_task_id = ""
@@ -1217,7 +1455,15 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
         named_paths.append((key, path))
 
     fetched = await asyncio.gather(
-        *[_fetch_sender_path(sender_bgz_base, sender_access_token, path) for _, path in named_paths],
+        *[
+            _fetch_sender_path(
+                sender_bgz_base,
+                sender_access_token,
+                path,
+                authorization_base=authorization_base,
+            )
+            for _, path in named_paths
+        ],
         return_exceptions=False,
     )
     pulls = {name: result for (name, _), result in zip(named_paths, fetched)}
@@ -1227,6 +1473,7 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
         "notification_summary": _task_summary(task, received_at=""),
         "sender": {
             "sender_ura": sender_ura,
+            "authorization_base": authorization_base or None,
             "sender_bgz_base": sender_bgz_base,
             "sender_bgz_base_from_task": sender_base_from_task,
             "sender_bgz_base_from_directory": discovered_bgz_base,
@@ -1240,6 +1487,9 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
             "scope": token_payload.get("scope"),
             "expires_in": token_payload.get("expires_in"),
             "received": True,
+            "attestation_source": selected_token_summary.get("source"),
+            "selected_introspection": selected_token_summary,
+            "candidate_evaluation": evaluated_sender_tokens,
         },
         "pulls": pulls,
     }
@@ -1320,7 +1570,7 @@ async def health() -> dict[str, Any]:
         "public_root": settings.public_root,
         "public_base": settings.public_base,
         "require_bearer_token": bool(settings.require_bearer_token),
-        "required_scope": str(settings.required_scope or "").strip() or None,
+        "required_scope": str(settings.required_incoming_scope or "").strip() or None,
         "stored_tasks": len(tasks),
     }
 

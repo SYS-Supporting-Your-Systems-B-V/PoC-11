@@ -33,7 +33,7 @@ def _set_settings(monkeypatch, appmod) -> None:
     monkeypatch.setattr(appmod.settings, "public_base", "https://mach2.disyepd.com/receiver-mock/fhir", raising=False)
     monkeypatch.setattr(appmod.settings, "default_task_status", "requested", raising=False)
     monkeypatch.setattr(appmod.settings, "require_bearer_token", True, raising=False)
-    monkeypatch.setattr(appmod.settings, "required_scope", "eOverdracht-receiver", raising=False)
+    monkeypatch.setattr(appmod.settings, "required_incoming_scope", "eOverdracht-receiver", raising=False)
     monkeypatch.setattr(appmod.settings, "session_cookie_secure", False, raising=False)
     monkeypatch.setattr(appmod.settings, "receiver_organization_ura", "87654321", raising=False)
     monkeypatch.setattr(appmod.settings, "dezi_client_id", "87654321", raising=False)
@@ -186,6 +186,31 @@ def test_post_task_rejects_when_token_organization_does_not_match_task(monkeypat
     assert response.json()["detail"]["reason"] == "organization_not_authorized"
 
 
+def test_post_task_accepts_matching_token_subject_id_fallback(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    async def _fake_introspect(_token: str):
+        return appmod.TokenContext(
+            raw={},
+            active=True,
+            organization_ura="00000000",
+            subject_id="12345678",
+            scopes=["eOverdracht-receiver"],
+        )
+
+    monkeypatch.setattr(appmod, "_introspect_token", _fake_introspect)
+
+    with TestClient(appmod.app) as client:
+        response = client.post(
+            "/fhir/Task",
+            json=_task_payload(sender_ura="12345678"),
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+    assert response.status_code == 201, response.text
+
+
 def test_ui_state_lists_tasks_and_reports_logged_out_session(monkeypatch):
     appmod = _import_app_module()
     _set_settings(monkeypatch, appmod)
@@ -242,7 +267,12 @@ def test_ui_state_includes_dezi_claims_and_tokens_when_logged_in(monkeypatch):
         session.dezi_logged_in_at = "2026-03-31T15:00:00Z"
         session.dezi_id_token = "dezi-id-token"
         session.dezi_userinfo_jwt = "dezi-userinfo-jwt"
-        session.dezi_identity = {"display_name": "Dr. Demo", "organization_ura": "87654321", "roles": ["01.041"]}
+        session.dezi_identity = {
+            "display_name": "Dr. Demo",
+            "organization_ura": "87654321",
+            "employee_identifier": "dezi-001",
+            "roles": ["01.041"],
+        }
         session.dezi_claims = {"sub": "demo-sub", "relations": [{"ura": "87654321", "roles": ["01.041"]}]}
         session.dezi_token_metadata = {"scope": "openid"}
         appmod.app.state.session_store.save(session)
@@ -378,30 +408,235 @@ def test_dezi_callback_redirects_back_to_receiver_root(monkeypatch):
     assert response.headers["location"] == "https://mach2.disyepd.com/receiver-mock/?task_id=task-abc"
 
 
+def test_endpoint_matches_capability_supports_fhir_payloadtype_coding():
+    appmod = _import_app_module()
+
+    endpoint = {
+        "resourceType": "Endpoint",
+        "payloadType": [
+            {
+                "coding": [
+                    {
+                        "system": "http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities",
+                        "code": "Nuts-OAuth",
+                    }
+                ]
+            }
+        ],
+    }
+
+    assert appmod._endpoint_matches_capability(endpoint, "Nuts-OAuth") is True
+
+
+def test_request_sender_access_token_uses_explicit_sender_scope(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+    monkeypatch.setattr(appmod.settings, "sender_data_scope", "eOverdracht-sender", raising=False)
+
+    class _DummyResponse:
+        def __init__(self, status_code: int, body: dict):
+            self.status_code = status_code
+            self._body = body
+            self.text = ""
+
+        def json(self):
+            return self._body
+
+    class _FakeHttpClient:
+        def __init__(self):
+            self.post_calls = []
+
+        async def post(self, url, *, json=None, headers=None, timeout=None):
+            self.post_calls.append({"url": url, "json": json, "headers": headers or {}, "timeout": timeout})
+            return _DummyResponse(200, {"access_token": "sender-token", "token_type": "Bearer"})
+
+    fake = _FakeHttpClient()
+    monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+
+    body = asyncio.run(
+        appmod._request_sender_access_token(
+            task=_task_payload(sender_ura="12345678"),
+            sender_oauth_endpoint="https://sender.example/nuts-oauth2/oauth2/12345678",
+            additional_credentials=[
+                {
+                    "@context": ["https://www.w3.org/2018/credentials/v1", "https://nuts.nl/credentials/v1"],
+                    "type": ["VerifiableCredential", "NutsEmployeeCredential"],
+                    "credentialSubject": {"identifier": "dezi-001", "roleName": "01.041"},
+                }
+            ],
+        )
+    )
+
+    assert body["access_token"] == "sender-token"
+    assert fake.post_calls == [
+        {
+            "url": "http://nuts-node:8083/internal/auth/v2/87654321/request-service-access-token",
+            "json": {
+                "authorization_server": "https://sender.example/nuts-oauth2/oauth2/12345678",
+                "token_type": "Bearer",
+                "scope": "eOverdracht-sender",
+                "credentials": [
+                    {
+                        "@context": ["https://www.w3.org/2018/credentials/v1", "https://nuts.nl/credentials/v1"],
+                        "type": ["VerifiableCredential", "NutsEmployeeCredential"],
+                        "credentialSubject": {"identifier": "dezi-001", "roleName": "01.041"},
+                    }
+                ],
+            },
+            "headers": {"Accept": "application/json"},
+            "timeout": 10.0,
+        }
+    ]
+
+
+def test_request_sender_access_token_requires_sender_scope(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+    monkeypatch.setattr(appmod.settings, "sender_data_scope", "", raising=False)
+
+    try:
+        asyncio.run(
+            appmod._request_sender_access_token(
+                task=_task_payload(sender_ura="12345678"),
+                sender_oauth_endpoint="https://sender.example/nuts-oauth2/oauth2/12345678",
+            )
+        )
+    except appmod.HTTPException as exc:
+        assert exc.status_code == 500
+        assert exc.detail["reason"] == "misconfigured"
+        assert exc.detail["message"] == "Geen sender scope geconfigureerd voor de sender tokenaanvraag."
+    else:
+        raise AssertionError("Expected HTTPException for missing sender scope")
+
+
+def test_select_sender_access_token_prefers_candidate_with_employee_claims(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    request_calls = []
+
+    async def _fake_request_sender_access_token(*, task, sender_oauth_endpoint: str, additional_credentials=None):
+        request_calls.append(
+            {
+                "task_id": task["id"],
+                "additional_credentials": additional_credentials,
+                "sender_oauth_endpoint": sender_oauth_endpoint,
+            }
+        )
+        return {
+            "access_token": "sender-token-a",
+            "token_type": "Bearer",
+            "scope": "eOverdracht-sender",
+            "expires_in": 900,
+        }
+
+    async def _fake_introspect_access_token_payload(token: str):
+        return {
+            "active": True,
+            "organization_ura": "87654321",
+            "employee_identifier": "dezi-001",
+            "employee_roles": ["doctor"],
+            "scope": "eOverdracht-sender",
+        }
+
+    monkeypatch.setattr(appmod, "_request_sender_access_token", _fake_request_sender_access_token)
+    monkeypatch.setattr(appmod, "_introspect_access_token_payload", _fake_introspect_access_token_payload)
+
+    session = appmod.UserSession(session_id="sess-1", created_at="2026-04-02T11:00:00Z")
+    session.dezi_identity = {
+        "display_name": "K. Smith",
+        "employee_identifier": "dezi-001",
+        "roles": ["doctor", "01.041"],
+    }
+
+    token_payload, access_token, selected_summary, evaluated = asyncio.run(
+        appmod._select_sender_access_token(
+            task={"id": "notif-1", "owner": {"identifier": {"value": "87654321"}}},
+            sender_oauth_endpoint="https://sender.example/nuts-oauth2/oauth2/12345678",
+            session=session,
+        )
+    )
+
+    assert token_payload["access_token"] == "sender-token-a"
+    assert access_token == "sender-token-a"
+    assert selected_summary["source"] == "credentials"
+    assert selected_summary["employee_identifier"] == "dezi-001"
+    assert selected_summary["introspection_raw"]["employee_identifier"] == "dezi-001"
+    assert len(evaluated) == 1
+    assert evaluated[0]["introspection_raw"]["organization_ura"] == "87654321"
+    assert evaluated[0]["introspection_raw"]["employee_roles"] == ["doctor"]
+    assert request_calls == [
+        {
+            "task_id": "notif-1",
+            "additional_credentials": [
+                {
+                    "@context": ["https://www.w3.org/2018/credentials/v1", "https://nuts.nl/credentials/v1"],
+                    "type": ["VerifiableCredential", "NutsEmployeeCredential"],
+                    "credentialSubject": {"identifier": "dezi-001", "name": "K. Smith", "roleName": "doctor"},
+                },
+                {
+                    "@context": ["https://www.w3.org/2018/credentials/v1", "https://nuts.nl/credentials/v1"],
+                    "type": ["VerifiableCredential", "NutsEmployeeCredential"],
+                    "credentialSubject": {"identifier": "dezi-001", "name": "K. Smith", "roleName": "01.041"},
+                },
+            ],
+            "sender_oauth_endpoint": "https://sender.example/nuts-oauth2/oauth2/12345678",
+        },
+    ]
+
+
 def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
     appmod = _import_app_module()
     _set_settings(monkeypatch, appmod)
 
     sender_access_token_calls = []
+    sender_fetch_calls = []
 
     async def _fake_discover_sender_endpoints(_sender_ura: str):
         return {
             "organization": {"resourceType": "Organization", "id": "org-sender"},
-            "oauth_endpoint": {"address": "https://sender.example/nuts-oauth2/oauth2/00700700"},
+            "oauth_endpoint": {"address": "https://sender.example/nuts-oauth2"},
             "bgz_endpoint": {"address": "https://sender.example/notifiedpull/fhir"},
         }
 
-    async def _fake_request_sender_access_token(*, task, dezi_id_token: str, sender_oauth_endpoint: str):
+    async def _fake_select_sender_access_token(*, task, sender_oauth_endpoint: str, session):
         sender_access_token_calls.append(
             {
                 "task_id": task["id"],
-                "dezi_id_token": dezi_id_token,
+                "dezi_identity": session.dezi_identity,
                 "sender_oauth_endpoint": sender_oauth_endpoint,
             }
         )
-        return {"access_token": "sender-token", "token_type": "Bearer", "scope": "bgz"}
+        token_payload = {"access_token": "sender-token", "token_type": "Bearer", "scope": "bgz"}
+        selected_summary = {
+            "source": "credentials",
+            "employee_identifier": "dezi-001",
+            "employee_identifier_present": True,
+            "employee_roles": ["01.041"],
+            "employee_roles_present": True,
+            "introspection_raw": {
+                "active": True,
+                "employee_identifier": "dezi-001",
+                "employee_roles": ["01.041"],
+            },
+        }
+        return token_payload, "sender-token", selected_summary, [selected_summary]
 
-    async def _fake_fetch_sender_path(sender_bgz_base: str, sender_access_token: str, relative_path: str):
+    async def _fake_fetch_sender_path(
+        sender_bgz_base: str,
+        sender_access_token: str,
+        relative_path: str,
+        *,
+        authorization_base: str | None = None,
+    ):
+        sender_fetch_calls.append(
+            {
+                "sender_bgz_base": sender_bgz_base,
+                "sender_access_token": sender_access_token,
+                "relative_path": relative_path,
+                "authorization_base": authorization_base,
+            }
+        )
         return {
             "ok": True,
             "url": f"{sender_bgz_base.rstrip('/')}/{relative_path}",
@@ -411,7 +646,7 @@ def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
         }
 
     monkeypatch.setattr(appmod, "_discover_sender_endpoints", _fake_discover_sender_endpoints)
-    monkeypatch.setattr(appmod, "_request_sender_access_token", _fake_request_sender_access_token)
+    monkeypatch.setattr(appmod, "_select_sender_access_token", _fake_select_sender_access_token)
     monkeypatch.setattr(appmod, "_fetch_sender_path", _fake_fetch_sender_path)
 
     with TestClient(appmod.app) as client:
@@ -421,7 +656,12 @@ def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
         stored = appmod.app.state.task_store.save(task)
         session = appmod.app.state.session_store.create()
         session.dezi_id_token = "dezi-id-token"
-        session.dezi_identity = {"display_name": "Dr. Demo", "organization_ura": "87654321", "roles": ["01.041"]}
+        session.dezi_identity = {
+            "display_name": "Dr. Demo",
+            "organization_ura": "87654321",
+            "employee_identifier": "dezi-001",
+            "roles": ["01.041"],
+        }
         appmod.app.state.session_store.save(session)
         client.cookies.set(appmod.settings.session_cookie_name, session.session_id)
 
@@ -429,15 +669,24 @@ def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["sender"]["sender_oauth_endpoint"] == "https://sender.example/nuts-oauth2/oauth2/00700700"
+    assert body["sender"]["sender_oauth_endpoint"] == "https://sender.example/nuts-oauth2"
+    assert body["sender"]["authorization_base"] == "auth-123"
     assert body["sender"]["sender_bgz_base"] == "https://mach2.disyepd.com/notifiedpull/fhir"
     assert body["sender_access_token"]["received"] is True
+    assert body["sender_access_token"]["attestation_source"] == "credentials"
+    assert body["sender_access_token"]["selected_introspection"]["introspection_raw"]["employee_identifier"] == "dezi-001"
     assert body["pulls"]["workflow_task"]["body"]["path"] == "Task/wf-123"
     assert body["pulls"]["patient"]["body"]["token"] == "sender-token"
+    assert all(call["authorization_base"] == "auth-123" for call in sender_fetch_calls)
     assert sender_access_token_calls == [
         {
             "task_id": "notif-1",
-            "dezi_id_token": "dezi-id-token",
-            "sender_oauth_endpoint": "https://sender.example/nuts-oauth2/oauth2/00700700",
+            "dezi_identity": {
+                "display_name": "Dr. Demo",
+                "organization_ura": "87654321",
+                "employee_identifier": "dezi-001",
+                "roles": ["01.041"],
+            },
+            "sender_oauth_endpoint": "https://sender.example/nuts-oauth2/oauth2/12345678",
         }
     ]

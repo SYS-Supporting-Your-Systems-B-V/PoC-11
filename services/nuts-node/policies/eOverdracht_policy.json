@@ -66,6 +66,58 @@
               }
             ]
           }
+        },
+        {
+          "id": "id_employee_identity",
+          "name": "Care professional identity from Dezi",
+          "purpose": "Finding a care professional for authorizing access to medical metadata.",
+          "constraints": {
+            "fields": [
+              {
+                "path": [
+                  "$.type",
+                  "$.type[*]"
+                ],
+                "filter": {
+                  "type": "string",
+                  "const": "NutsEmployeeCredential"
+                }
+              },
+              {
+                "id": "employee_identifier",
+                "path": [
+                  "$.credentialSubject.identifier",
+                  "$.credentialSubject.Identifier",
+                  "$.credentialSubject.employee.identifier",
+                  "$.credentialSubject.employee.Identifier",
+                  "$.employee.identifier",
+                  "$.employee.Identifier",
+                  "$.Dezi_id",
+                  "$.dezi_id",
+                  "$.uzi_id",
+                  "$.uziNumber"
+                ],
+                "filter": {
+                  "type": "string"
+                }
+              },
+              {
+                "id": "employee_roles",
+                "path": [
+                  "$.credentialSubject.roleName",
+                  "$.credentialSubject.RoleName",
+                  "$.credentialSubject.employee.roleName",
+                  "$.credentialSubject.employee.RoleName",
+                  "$.employee.roleName",
+                  "$.employee.RoleName",
+                  "$.relations[*].roles[*]"
+                ],
+                "filter": {
+                  "type": "string"
+                }
+              }
+            ]
+          }
         }
       ]
     }

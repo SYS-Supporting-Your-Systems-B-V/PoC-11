@@ -55,16 +55,9 @@ Use:
 
 If you need to re-issue the fake certs instead of reusing the files already in this folder:
 
-```bash
-docker run --rm \
-  -v "$(pwd -W)/services/nuts-node/certs:/work" \
-  -w /work \
-  alpine:3.19 \
-  sh -lc '
-    apk add --no-cache bash openssl git
-    git clone --depth 1 https://github.com/nuts-foundation/go-didx509-toolkit.git /tmp/toolkit
-    cd /tmp/toolkit/test_ca
-    bash ./issue-cert.sh mach2.disyepd.com "Local Dev Org" "Locality" 00000000000 00000000 00700700
-    cp -v /tmp/toolkit/test_ca/out/* /work
-  '
+```PowerShell
+docker run --rm `
+  -v "C:\Users\Yob\Documents\Coding\PoC 9\PoC-9-SYS\services\nuts-node\certs:/work" `
+  alpine:3.19 `
+  sh /work/generate-certs.sh
 ```
