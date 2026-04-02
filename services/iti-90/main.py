@@ -25,7 +25,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from typing import Annotated, Dict, Any, List, Optional, Tuple, Literal
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, urlsplit
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import Field, BaseModel, field_validator, ConfigDict
@@ -1286,7 +1286,7 @@ def _auth_headers() -> Dict[str, str]:
     return headers
 
 
-def _extract_receiver_auth_server_url(mapping: Dict[str, Any]) -> str:
+def _extract_receiver_auth_server_url(mapping: Dict[str, Any], receiver_subject_id: str) -> str:
     chosen = ((((mapping or {}).get("mapping") or {}).get("nuts_oauth") or {}).get("chosen") or {})
     raw = str(chosen.get("address") or chosen.get("base") or "").strip()
     if not raw:
@@ -1300,10 +1300,22 @@ def _extract_receiver_auth_server_url(mapping: Dict[str, Any]) -> str:
                 ),
             },
         )
-    return _validate_http_base_url(raw, field_name="receiver_oauth_endpoint")
+    auth_server_base = _validate_http_base_url(raw, field_name="receiver_oauth_endpoint")
+    remote_subject_id = str(receiver_subject_id or "").strip()
+    if not remote_subject_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "no_receiver_subject_id",
+                "message": "Geen receiver subject-id beschikbaar voor het construeren van de Nuts OAuth issuer URL.",
+            },
+        )
+    if "/oauth2/" in urlsplit(auth_server_base).path:
+        return auth_server_base.rstrip("/")
+    return f"{auth_server_base.rstrip('/')}/oauth2/{quote(remote_subject_id, safe='')}"
 
 
-async def _request_receiver_access_token(*, mapping: Dict[str, Any], sender_subject_id: str) -> str:
+async def _request_receiver_access_token(*, mapping: Dict[str, Any], sender_subject_id: str, receiver_subject_id: str) -> str:
     subject_id = str(sender_subject_id or "").strip()
     if not subject_id:
         raise HTTPException(
@@ -1314,7 +1326,7 @@ async def _request_receiver_access_token(*, mapping: Dict[str, Any], sender_subj
             },
         )
 
-    auth_server_url = _extract_receiver_auth_server_url(mapping)
+    auth_server_url = _extract_receiver_auth_server_url(mapping, receiver_subject_id)
     nuts_internal_base = _validate_http_base_url(
         str(settings.nuts_internal_base or "").strip(),
         field_name="nuts_internal_base",
@@ -5754,6 +5766,7 @@ async def bgz_notify(
     receiver_access_token = await _request_receiver_access_token(
         mapping=mapping,
         sender_subject_id=sender_subject_id,
+        receiver_subject_id=resolved_receiver_ura,
     )
 
     if client_receiver_ura and client_receiver_ura != resolved_receiver_ura:

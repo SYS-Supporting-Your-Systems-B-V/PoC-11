@@ -906,9 +906,9 @@ def test_bgz_notify_posts_task_and_returns_result(appmod, client, monkeypatch):
 
     assert len(fake.post_calls) == 2
     token_post = fake.post_calls[0]
-    assert token_post["url"] == "http://nuts-node:8083/internal/auth/v2/12345678/request-service-access-token"
+    assert token_post["url"] == "http://nuts-node:8083/internal/auth/v2/00700700/request-service-access-token"
     assert token_post["json"] == {
-        "authorization_server": "https://receiver.example/nuts-oauth2",
+        "authorization_server": "https://receiver.example/nuts-oauth2/oauth2/87654321",
         "scope": "eOverdracht-receiver",
         "token_type": "Bearer",
     }
@@ -1005,7 +1005,7 @@ def test_bgz_notify_uses_public_base_and_storage_base_and_persists_authorization
     assert auth_input["valueString"] == auth_identifier["value"]
 
     assert len(fake.post_calls) == 2
-    assert fake.post_calls[0]["url"] == "http://nuts-node:8083/internal/auth/v2/12345678/request-service-access-token"
+    assert fake.post_calls[0]["url"] == "http://nuts-node:8083/internal/auth/v2/00700700/request-service-access-token"
 
     notification_task = fake.post_calls[1]["json"]
     assert fake.post_calls[1]["headers"].get("Authorization") == "Bearer receiver-token"
