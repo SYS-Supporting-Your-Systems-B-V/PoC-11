@@ -308,15 +308,34 @@ def _extract_workflow_task_ref(task: dict[str, Any]) -> Optional[str]:
     return value or None
 
 
+def _extract_workflow_task_identifier(task: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    based_on = task.get("basedOn") or []
+    if not isinstance(based_on, list) or not based_on:
+        return None, None
+    identifier = ((based_on[0] or {}).get("identifier") or {})
+    system = str(identifier.get("system") or "").strip() or None
+    value = str(identifier.get("value") or "").strip() or None
+    return system, value
+
+
+def _workflow_task_search_path(identifier_system: str, identifier_value: str) -> str:
+    query = urlencode({"identifier": f"{identifier_system}|{identifier_value}"})
+    return f"Task?{query}"
+
+
 def _task_summary(task: dict[str, Any], *, received_at: str) -> dict[str, Any]:
     owner_identifier = ((task.get("owner") or {}).get("identifier") or {})
     patient_identifier = ((task.get("for") or {}).get("identifier") or {})
     based_on = task.get("basedOn") or []
     first_based_on = based_on[0] if isinstance(based_on, list) and based_on else {}
+    based_on_identifier_system, based_on_identifier_value = _extract_workflow_task_identifier(task)
     return {
         "id": str(task.get("id") or "").strip(),
         "status": str(task.get("status") or "").strip() or None,
-        "based_on": str((first_based_on or {}).get("reference") or "").strip() or None,
+        "based_on": based_on_identifier_value or str((first_based_on or {}).get("reference") or "").strip() or None,
+        "based_on_identifier_system": based_on_identifier_system,
+        "based_on_identifier_value": based_on_identifier_value,
+        "based_on_reference": str((first_based_on or {}).get("reference") or "").strip() or None,
         "authorization_base": _extract_task_input_value(task, "authorization-base"),
         "get_workflow_task": _extract_task_input_value(task, "get-workflow-task"),
         "sender_bgz_base": _extract_sender_bgz_base(task),
@@ -484,6 +503,10 @@ async def _authorize_notification_request(request: Request, task: dict[str, Any]
         _raise_http(401, "missing_bearer_token", "Bearer token ontbreekt.")
 
     token_ctx = await _introspect_token(token)
+    _authorize_incoming_notification_policy(token_ctx=token_ctx, task=task)
+
+
+def _authorize_incoming_notification_policy(*, token_ctx: TokenContext, task: dict[str, Any]) -> None:
     task_sender_ura = _extract_task_sender_ura(task)
     if not task_sender_ura:
         _raise_http(
@@ -499,6 +522,22 @@ async def _authorize_notification_request(request: Request, task: dict[str, Any]
             token_organization_ura=token_ctx.organization_ura,
             token_subject_id=token_ctx.subject_id or None,
             task_sender_ura=task_sender_ura,
+        )
+    task_owner_ura = _extract_task_owner_ura(task)
+    configured_receiver_ura = str(settings.receiver_organization_ura or "").strip()
+    if not task_owner_ura:
+        _raise_http(
+            400,
+            "missing_task_owner_ura",
+            "Notification Task mist owner.identifier.value (receiver URA).",
+        )
+    if configured_receiver_ura and task_owner_ura != configured_receiver_ura:
+        _raise_http(
+            403,
+            "receiver_not_authorized",
+            "owner.identifier.value in de notification Task matcht niet met de receiver organisatie.",
+            configured_receiver_ura=configured_receiver_ura,
+            task_owner_ura=task_owner_ura,
         )
 
 
@@ -1424,6 +1463,7 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
     sender_ura = _extract_task_sender_ura(task)
     sender_base_from_task = _extract_sender_bgz_base(task)
     workflow_task_ref = _extract_workflow_task_ref(task)
+    workflow_task_identifier_system, workflow_task_identifier_value = _extract_workflow_task_identifier(task)
     authorization_base = str(_extract_task_input_value(task, "authorization-base") or "").strip()
 
     discovery = await _discover_sender_endpoints(str(sender_ura or ""))
@@ -1433,7 +1473,7 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
     sender_auth_server_url = _sender_authorization_server_url(sender_oauth_endpoint, str(sender_ura or ""))
 
     discovered_bgz_base = str(((discovery.get("bgz_endpoint") or {}).get("address")) or "").strip() or None
-    sender_bgz_base = str(sender_base_from_task or "").strip() or str(discovered_bgz_base or "").strip()
+    sender_bgz_base = str(discovered_bgz_base or "").strip() or str(sender_base_from_task or "").strip()
     if not sender_bgz_base:
         _raise_http(404, "sender_bgz_base_missing", "Geen sender BgZ endpoint gevonden in de notification Task of directory.", sender_ura=sender_ura)
 
@@ -1445,7 +1485,11 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
 
     named_paths: list[tuple[str, str]] = []
     workflow_task_id = ""
-    if workflow_task_ref:
+    workflow_task_search_path = ""
+    if workflow_task_identifier_system and workflow_task_identifier_value:
+        workflow_task_search_path = _workflow_task_search_path(workflow_task_identifier_system, workflow_task_identifier_value)
+        named_paths.append(("workflow_task", workflow_task_search_path))
+    elif workflow_task_ref:
         _, workflow_task_id = _split_ref(workflow_task_ref)
         if workflow_task_id:
             named_paths.append(("workflow_task", f"Task/{workflow_task_id}"))
@@ -1479,6 +1523,9 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
             "sender_bgz_base_from_directory": discovered_bgz_base,
             "sender_oauth_endpoint": sender_oauth_endpoint,
             "workflow_task_ref": workflow_task_ref,
+            "workflow_task_identifier_system": workflow_task_identifier_system,
+            "workflow_task_identifier_value": workflow_task_identifier_value,
+            "workflow_task_search_path": workflow_task_search_path or None,
             "workflow_task_id": workflow_task_id or None,
         },
         "dezi_identity": copy.deepcopy(session.dezi_identity),

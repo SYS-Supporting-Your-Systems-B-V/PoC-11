@@ -15,7 +15,9 @@ Responsibilities:
 
 It is intentionally not a real receiver implementation:
 
-- receiver-side auth is limited to bearer-token introspection plus `organization_ura` matching against `Task.requester.onBehalfOf.identifier.value`
+- receiver-side auth is limited to bearer-token introspection plus a repo-local policy check on:
+  - sender `organization_ura` matching `Task.requester.onBehalfOf.identifier.value`
+  - receiver URA matching `Task.owner.identifier.value`
 - no FHIR profile validation
 - no persistent storage
 - no production-grade receiver workflow processing
@@ -53,6 +55,7 @@ Current notification authorization behavior:
 - the bearer token is introspected via the local Nuts node (`/internal/auth/v2/accesstoken/introspect`)
 - the introspection result must contain `organization_ura`
 - the token `organization_ura` must match `Task.requester.onBehalfOf.identifier.value`
+- `Task.owner.identifier.value` must match the configured receiver organization URA
 - the token must include the configured receiver scope (default `eOverdracht-receiver`)
 
 Current DEZI + protected pull behavior:
@@ -62,7 +65,8 @@ Current DEZI + protected pull behavior:
 - the userinfo response is decrypted and validated locally
 - the resulting DEZI id-token is included in the local Nuts `request-service-access-token` call
 - the sender `Nuts-OAuth` endpoint is resolved from the Query Directory using the sender URA from the incoming notification task
-- the sender BgZ base is taken from the notification task extension first and falls back to the directory `BGZ Server` endpoint when needed
+- the workflow task is fetched via `GET /fhir/Task?identifier=...` using `Task.basedOn[0].identifier`
+- the sender BgZ base is resolved from the directory first and only falls back to the notification task extension for backward compatibility with older notifications
 
 Important configuration:
 

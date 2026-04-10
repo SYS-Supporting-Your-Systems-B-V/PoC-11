@@ -108,130 +108,50 @@ def assert_task_matches_notification_template(
     task: Dict[str, Any],
     template: Dict[str, Any],
     sender_ura: str,
-    sender_name: str,
     sender_uzi_sys: str,
-    sender_system_name: str,
     receiver_ura: str,
-    receiver_name: str,
-    patient_bsn: str,
-    patient_name: Optional[str],
-    description: Optional[str],
-    expected_owner_ref: Optional[str],
-    expected_owner_display: Optional[str],
-    expected_location_ref: Optional[str],
-    expected_location_display: Optional[str],
-    expected_extension_location_ref: Optional[str] = None,
-    expected_extension_location_display: Optional[str] = None,
-    expected_extension_healthcareservice_ref: Optional[str] = None,
-    expected_extension_healthcareservice_display: Optional[str] = None,
-    expected_workflow_task_id: Optional[str],
+    expected_workflow_task_identifier_value: Optional[str],
+    expected_authorization_base: Optional[str] = None,
 ) -> None:
     """Asserties voor de gegenereerde BgZ Task op basis van notification-task.json.
 
     Doel:
-    - vaste velden moeten gelijk blijven aan de template (profile, code, input, etc.)
-    - dynamische velden worden op vorm/inhoud gevalideerd (UUIDs, datetimes, routing refs)
+    - de notification Task moet exact de minimale Step 2 shape houden
+    - dynamische velden worden op vorm/inhoud gevalideerd
     """
 
     # --- Ongewijzigd t.o.v. template ---
-    for key in ("resourceType", "id", "meta", "status", "intent", "code"):
+    for key in ("resourceType", "status", "intent", "code"):
         assert task.get(key) == template.get(key), f"Veld '{key}' wijkt af van template"
 
-    # --- groupIdentifier / identifier: UUID URNs maar met zelfde system ---
-    assert task["groupIdentifier"]["system"] == template["groupIdentifier"]["system"]
-    _assert_urn_uuid(task["groupIdentifier"]["value"])
+    assert set(task.keys()) == {"resourceType", "basedOn", "status", "intent", "code", "requester", "owner", "input"}
 
-    assert isinstance(task.get("identifier"), list) and task["identifier"], "identifier ontbreekt"
-    assert task["identifier"][0]["system"] == template["identifier"][0]["system"]
-    _assert_urn_uuid(task["identifier"][0]["value"])
-
-    # --- basedOn: Workflow Task reference (PoC 9 / TA Notified Pull) ---
+    # --- basedOn: Workflow Task identifier ---
     assert isinstance(task.get("basedOn"), list) and task["basedOn"], "basedOn ontbreekt"
     assert isinstance(task["basedOn"][0], dict), "basedOn[0] moet een dict zijn"
-    based_on_ref = task["basedOn"][0].get("reference")
-    assert isinstance(based_on_ref, str) and based_on_ref.strip(), "basedOn[0].reference ontbreekt"
-
-    if expected_workflow_task_id:
-        wf = str(expected_workflow_task_id).strip()
-        if "://" in wf or wf.startswith("Task/"):
-            expected_ref = wf
-        else:
-            expected_ref = f"Task/{wf}"
-        assert based_on_ref == expected_ref, f"basedOn.reference wijkt af ({based_on_ref} != {expected_ref})"
+    based_on_identifier = (task["basedOn"][0].get("identifier") or {})
+    assert based_on_identifier["system"] == template["basedOn"][0]["identifier"]["system"]
+    based_on_identifier_value = str(based_on_identifier.get("value") or "").strip()
+    assert based_on_identifier_value, "basedOn[0].identifier.value ontbreekt"
+    if expected_workflow_task_identifier_value:
+        assert based_on_identifier_value == expected_workflow_task_identifier_value
     else:
-        assert based_on_ref.startswith("Task/"), based_on_ref
-        uuid.UUID(based_on_ref.split("Task/", 1)[1])
-
-    # --- authoredOn / restriction.end: iso datetimes & ~365 dagen window ---
-    authored = _parse_dt(task["authoredOn"])
-    end = _parse_dt(task["restriction"]["period"]["end"])
-    assert end > authored
-    delta_days = (end - authored).days
-    assert 364 <= delta_days <= 366, f"restriction.end lijkt geen 365 dagen na authoredOn ({delta_days} dagen)"
+        _assert_urn_uuid(based_on_identifier_value)
+    assert "reference" not in task["basedOn"][0]
 
     # --- Sender (requester.onBehalfOf) ---
     assert task["requester"]["agent"]["identifier"]["system"] == template["requester"]["agent"]["identifier"]["system"]
     assert task["requester"]["agent"]["identifier"]["value"] == sender_uzi_sys
-    assert task["requester"]["agent"]["display"] == sender_system_name
+    assert "display" not in (task["requester"]["agent"] or {})
     assert task["requester"]["onBehalfOf"]["identifier"]["system"] == template["requester"]["onBehalfOf"]["identifier"]["system"]
     assert task["requester"]["onBehalfOf"]["identifier"]["value"] == sender_ura
-    assert task["requester"]["onBehalfOf"]["display"] == sender_name
+    assert "display" not in (task["requester"]["onBehalfOf"] or {})
 
-    # --- Receiver (owner.identifier + display) ---
+    # --- Receiver ---
     assert task["owner"]["identifier"]["system"] == template["owner"]["identifier"]["system"]
     assert task["owner"]["identifier"]["value"] == receiver_ura
-    assert task["owner"]["display"] == (expected_owner_display or receiver_name)
-
-    if expected_owner_ref is None:
-        assert "reference" not in (task.get("owner") or {}), "owner.reference hoort niet aanwezig te zijn"
-    else:
-        assert task["owner"]["reference"] == expected_owner_ref
-
-    # --- Location routing ---
-    if expected_location_ref is None:
-        assert "location" not in task, "Task.location hoort niet aanwezig te zijn"
-    else:
-        assert task["location"]["reference"] == expected_location_ref
-        if expected_location_display is not None:
-            assert task["location"].get("display") == expected_location_display
-
-    location_extension = _find_task_extension(
-        task,
-        "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-location",
-    )
-    if expected_extension_location_ref is None:
-        assert location_extension is None, "task-stu3-location hoort niet aanwezig te zijn"
-    else:
-        assert location_extension is not None, "task-stu3-location ontbreekt"
-        assert location_extension["valueReference"]["reference"] == expected_extension_location_ref
-        if expected_extension_location_display is not None:
-            assert location_extension["valueReference"].get("display") == expected_extension_location_display
-
-    healthcare_service_extension = _find_task_extension(
-        task,
-        "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-healthcareservice",
-    )
-    if expected_extension_healthcareservice_ref is None:
-        assert healthcare_service_extension is None, "task-stu3-healthcareservice hoort niet aanwezig te zijn"
-    else:
-        assert healthcare_service_extension is not None, "task-stu3-healthcareservice ontbreekt"
-        assert healthcare_service_extension["valueReference"]["reference"] == expected_extension_healthcareservice_ref
-        if expected_extension_healthcareservice_display is not None:
-            assert healthcare_service_extension["valueReference"].get("display") == expected_extension_healthcareservice_display
-
-    # --- Patient (Task.for) ---
-    assert task["for"]["identifier"]["system"] == template["for"]["identifier"]["system"]
-    assert task["for"]["identifier"]["value"] == patient_bsn
-    if patient_name:
-        assert task["for"].get("display") == patient_name
-    else:
-        assert "display" not in task.get("for", {}), "for.display hoort niet aanwezig te zijn als patient_name leeg is"
-
-    # --- Description ---
-    if description:
-        assert task.get("description") == description
-    else:
-        assert "description" not in task
+    assert "reference" not in (task.get("owner") or {})
+    assert "display" not in (task.get("owner") or {})
 
     # --- Task.input ---
     template_inputs = template.get("input") or []
@@ -252,13 +172,15 @@ def assert_task_matches_notification_template(
     assert auth_input is not None, "input authorization-base ontbreekt"
     auth_value = (auth_input or {}).get("valueString")
     assert isinstance(auth_value, str) and auth_value.strip(), "authorization-base valueString ontbreekt"
-    assert auth_value != "DYNAMIC:authorization_base", "authorization-base placeholder is niet vervangen"
-    decoded = base64.b64decode(auth_value).decode()
-    uuid.UUID(decoded)
+    if expected_authorization_base:
+        assert auth_value == expected_authorization_base
+    else:
+        assert auth_value != "DYNAMIC:authorization_base", "authorization-base placeholder is niet vervangen"
+        decoded = base64.b64decode(auth_value).decode()
+        uuid.UUID(decoded)
 
-    get_wf_input = _task_input_by_code(task_inputs, "get-workflow-task")
-    assert get_wf_input is not None, "input get-workflow-task ontbreekt"
-    assert get_wf_input.get("valueBoolean") is True
+    for key in ("id", "meta", "groupIdentifier", "identifier", "description", "restriction", "for", "authoredOn", "extension", "location"):
+        assert key not in task, f"Veld '{key}' hoort niet aanwezig te zijn"
 
 
 @dataclass
@@ -352,7 +274,7 @@ def appmod(monkeypatch):
     monkeypatch.setattr(mod.settings, "api_key", "test-api-key", raising=False)
     monkeypatch.setattr(mod.settings, "sender_ura", "12345678", raising=False)
     monkeypatch.setattr(mod.settings, "sender_name", "Huisartsenpraktijk De Vries", raising=False)
-    monkeypatch.setattr(mod.settings, "sender_uzi_sys", "00009876543", raising=False)
+    monkeypatch.setattr(mod.settings, "sender_uzi_sys", "urn:oid:2.16.528.1.1007.3.2.1234567", raising=False)
     monkeypatch.setattr(mod.settings, "sender_system_name", "SYS EPD POC9", raising=False)
     monkeypatch.setattr(mod.settings, "sender_bgz_base", None, raising=False)
     monkeypatch.setattr(mod.settings, "sender_bgz_public_base", None, raising=False)
@@ -692,34 +614,20 @@ def test_bgz_task_preview_location_routing_builds_task_from_template(appmod, cli
     assert body["notification_endpoint_id"] == "ep-1"
     assert isinstance(body.get("workflow_task_id"), str)
     assert body["workflow_task_id"].strip()
+    assert body["workflow_task_identifier_system"] == "urn:ietf:rfc:3986"
+    _assert_urn_uuid(body["workflow_task_identifier_value"])
+    assert body["authorization_base"]
 
     task = body["task"]
     assert_task_matches_notification_template(
         task=task,
         template=template,
         sender_ura="12345678",
-        sender_name="Huisartsenpraktijk De Vries",
-        sender_uzi_sys="00009876543",
-        sender_system_name="SYS EPD POC9",
+        sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
         receiver_ura="87654321",
-        receiver_name="Ziekenhuis Oost - Cardiologie",
-        patient_bsn="999999990",
-        patient_name="Test Patient",
-        description="BgZ beschikbaar voor test (locatie)",
-        expected_owner_ref="Organization/org-owner",
-        expected_owner_display="Ziekenhuis Oost",
-        expected_location_ref=None,
-        expected_location_display=None,
-        expected_extension_location_ref="Location/loc-1",
-        expected_extension_location_display="Ziekenhuis Oost - Cardiologie",
-        expected_workflow_task_id=body["workflow_task_id"],
+        expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
+        expected_authorization_base=body["authorization_base"],
     )
-    ext = next(
-        e for e in (task.get("extension") or [])
-        if (e or {}).get("url") == "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-location"
-    )
-    assert ext["valueReference"]["reference"] == "Location/loc-1"
-    assert ext["valueReference"]["display"] == "Ziekenhuis Oost - Cardiologie"
 
 
 def test_bgz_task_preview_healthcareservice_routing_builds_task_from_template(appmod, client, monkeypatch):
@@ -758,34 +666,20 @@ def test_bgz_task_preview_healthcareservice_routing_builds_task_from_template(ap
     body = r.json()
     assert isinstance(body.get("workflow_task_id"), str)
     assert body["workflow_task_id"].strip()
+    assert body["workflow_task_identifier_system"] == "urn:ietf:rfc:3986"
+    _assert_urn_uuid(body["workflow_task_identifier_value"])
+    assert body["authorization_base"]
     task = body["task"]
 
     assert_task_matches_notification_template(
         task=task,
         template=template,
         sender_ura="12345678",
-        sender_name="Huisartsenpraktijk De Vries",
-        sender_uzi_sys="00009876543",
-        sender_system_name="SYS EPD POC9",
+        sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
         receiver_ura="87654321",
-        receiver_name="Ziekenhuis Oost - Cardiologie",
-        patient_bsn="999999990",
-        patient_name="Test Patient",
-        description="BgZ beschikbaar voor test (service)",
-        expected_owner_ref="Organization/org-owner",
-        expected_owner_display="Ziekenhuis Oost",
-        expected_location_ref=None,
-        expected_location_display=None,
-        expected_extension_healthcareservice_ref="HealthcareService/hs-1",
-        expected_extension_healthcareservice_display="Ziekenhuis Oost - Cardiologie",
-        expected_workflow_task_id=body["workflow_task_id"],
+        expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
+        expected_authorization_base=body["authorization_base"],
     )
-    ext = next(
-        e for e in (task.get("extension") or [])
-        if (e or {}).get("url") == "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-healthcareservice"
-    )
-    assert ext["valueReference"]["reference"] == "HealthcareService/hs-1"
-    assert ext["valueReference"]["display"] == "Ziekenhuis Oost - Cardiologie"
 
 
 
@@ -827,26 +721,58 @@ def test_bgz_task_preview_generates_workflow_task_id_when_missing(appmod, client
     assert isinstance(body.get("workflow_task_id"), str)
     assert body["workflow_task_id"].strip()
     uuid.UUID(body["workflow_task_id"])
+    assert body["workflow_task_identifier_system"] == "urn:ietf:rfc:3986"
+    _assert_urn_uuid(body["workflow_task_identifier_value"])
+    assert body["authorization_base"]
 
     task = body["task"]
     assert_task_matches_notification_template(
         task=task,
         template=template,
         sender_ura="12345678",
-        sender_name="Huisartsenpraktijk De Vries",
-        sender_uzi_sys="00009876543",
-        sender_system_name="SYS EPD POC9",
+        sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
         receiver_ura="87654321",
-        receiver_name="Ziekenhuis Oost",
-        patient_bsn="999999990",
-        patient_name="Test Patient",
-        description="BgZ beschikbaar voor test (preview - generated workflow id)",
-        expected_owner_ref="Organization/org-1",
-        expected_owner_display="Ziekenhuis Oost",
-        expected_location_ref=None,
-        expected_location_display=None,
-        expected_workflow_task_id=body["workflow_task_id"],
+        expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
+        expected_authorization_base=body["authorization_base"],
     )
+
+
+def test_bgz_task_preview_rejects_non_urn_sender_software_identifier(appmod, client, monkeypatch):
+    monkeypatch.setattr(appmod.settings, "sender_uzi_sys", "00009876543", raising=False)
+
+    async def _fake_resolve(*, receiver_target_ref: str, receiver_org_ref: str | None, receiver_notification_endpoint_id: str | None):
+        return (
+            {
+                "organization": {"reference": "Organization/org-1", "display": "Ziekenhuis Oost"},
+            },
+            "https://receiver.example/fhir",
+            "ep-1",
+            "Organization/org-1",
+            "Organization/org-1",
+            "Organization",
+            "87654321",
+        )
+
+    monkeypatch.setattr(appmod, "_resolve_bgz_notify_destination", _fake_resolve)
+
+    response = client.post(
+        "/bgz/task-preview",
+        json={
+            "receiver_ura": "87654321",
+            "receiver_name": "Ziekenhuis Oost",
+            "receiver_org_ref": "Organization/org-1",
+            "receiver_target_ref": "Organization/org-1",
+            "receiver_notification_endpoint_id": "ep-1",
+            "patient_bsn": "999999990",
+        },
+        headers=_auth_headers(appmod),
+    )
+
+    assert response.status_code == 500
+    payload = response.json()
+    detail = payload.get("detail", payload)
+    assert detail["message"] == "MCSD_SENDER_UZI_SYS moet een RFC3986 URN zijn (urn:oid:... of urn:uuid:...)."
+
 
 def test_bgz_notify_posts_task_and_returns_result(appmod, client, monkeypatch):
     template = _load_json(_data_file(appmod, "notification-task.json"))
@@ -903,6 +829,9 @@ def test_bgz_notify_posts_task_and_returns_result(appmod, client, monkeypatch):
     assert body["task_id"] == "task-123"
     assert body["task_status"] == "requested"
     assert body.get("workflow_task_id") == "wf-777"
+    assert body["workflow_task_identifier_system"] == "urn:ietf:rfc:3986"
+    _assert_urn_uuid(body["workflow_task_identifier_value"])
+    assert body["authorization_base"]
 
     assert len(fake.post_calls) == 2
     token_post = fake.post_calls[0]
@@ -923,19 +852,10 @@ def test_bgz_notify_posts_task_and_returns_result(appmod, client, monkeypatch):
         task=sent_task,
         template=template,
         sender_ura="12345678",
-        sender_name="Huisartsenpraktijk De Vries",
-        sender_uzi_sys="00009876543",
-        sender_system_name="SYS EPD POC9",
+        sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
         receiver_ura="87654321",
-        receiver_name="Ziekenhuis Oost",
-        patient_bsn="999999990",
-        patient_name="Test Patient",
-        description="BgZ beschikbaar voor test (notify)",
-        expected_owner_ref="Organization/org-1",
-        expected_owner_display="Ziekenhuis Oost",
-        expected_location_ref=None,
-        expected_location_display=None,
-        expected_workflow_task_id="wf-777",
+        expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
+        expected_authorization_base=body["authorization_base"],
     )
 
 
@@ -999,6 +919,9 @@ def test_bgz_notify_uses_public_base_and_storage_base_and_persists_authorization
     )
     assert auth_identifier is not None
     assert auth_identifier["value"]
+    workflow_identifier = _find_task_identifier(workflow_task, "urn:ietf:rfc:3986")
+    assert workflow_identifier is not None
+    _assert_urn_uuid(workflow_identifier["value"])
 
     auth_input = _find_task_input(workflow_task, "authorization-base")
     assert auth_input is not None
@@ -1009,9 +932,10 @@ def test_bgz_notify_uses_public_base_and_storage_base_and_persists_authorization
 
     notification_task = fake.post_calls[1]["json"]
     assert fake.post_calls[1]["headers"].get("Authorization") == "Bearer receiver-token"
-    sender_bgz_ext = _find_task_extension(
-        notification_task,
-        "http://example.org/fhir/StructureDefinition/sender-bgz-base",
-    )
-    assert sender_bgz_ext is not None
-    assert sender_bgz_ext["valueUrl"] == "https://sender.example/notifiedpull/fhir"
+    sender_bgz_ext = _find_task_extension(notification_task, "http://example.org/fhir/StructureDefinition/sender-bgz-base")
+    assert sender_bgz_ext is None
+    assert response.json()["sender_bgz_base"] == "https://sender.example/notifiedpull/fhir"
+    assert notification_task["basedOn"][0]["identifier"]["value"] == workflow_identifier["value"]
+    notification_auth_input = _find_task_input(notification_task, "authorization-base")
+    assert notification_auth_input is not None
+    assert notification_auth_input["valueString"] == auth_identifier["value"]

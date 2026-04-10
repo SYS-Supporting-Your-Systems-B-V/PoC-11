@@ -42,6 +42,7 @@ Key configuration:
 Current PoC behavior:
 
 - `Task/{id}` read requires a valid token, matching `organization_ura`, and matching `authorization-base`
+- `Task?identifier=<system>|<value>` resolves exactly the geauthoriseerde workflow task for the current `authorization-base`
 - patient-identifying data reads/searches additionally require `employee_identifier` and `employee_roles`
 - if `BGZ_GATEWAY_MEDICAL_ROLE_CODES` is empty, the gateway still requires at least one non-empty `employee_roles` claim, but does not hardcode an arbitrary role-code list
 - `Task/{id}` update additionally requires the workflow task to remain active and preserves the stored `authorization-base` metadata on the outgoing PUT

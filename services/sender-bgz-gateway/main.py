@@ -373,6 +373,23 @@ def _request_authorization_base(request: Request) -> str:
     return str(request.headers.get(AUTHORIZATION_BASE_HEADER) or "").strip()
 
 
+def _request_task_identifier(request: Request) -> tuple[str, str]:
+    raw = str(request.query_params.get("identifier") or "").strip()
+    if not raw:
+        _raise_http(400, "missing_task_identifier", "Task search vereist een identifier query parameter.")
+    system, separator, value = raw.partition("|")
+    system = system.strip()
+    value = value.strip()
+    if not separator or not system or not value:
+        _raise_http(
+            400,
+            "invalid_task_identifier",
+            "Task identifier moet de vorm <system>|<value> hebben.",
+            received_identifier=raw,
+        )
+    return system, value
+
+
 def _task_has_authorization_base(task: dict[str, Any], authorization_base: str) -> bool:
     for ident in task.get("identifier") or []:
         if not isinstance(ident, dict):
@@ -824,6 +841,22 @@ async def read_workflow_task(task_id: str, request: Request) -> Response:
     if not _task_has_authorization_base(payload, authz.token.authorization_base):
         _raise_http(403, "task_authorization_mismatch", "Opgevraagde Task hoort niet bij authorization-base.")
     return _json_response(payload, headers=_response_headers(response))
+
+
+@app.get("/fhir/Task")
+async def search_workflow_task(request: Request) -> Response:
+    identifier_system, identifier_value = _request_task_identifier(request)
+    authz = await _authorize_request(request, require_professional=False, require_active_task=False)
+    if not _has_identifier(authz.task, system=identifier_system, value=identifier_value):
+        return _json_response({"resourceType": "Bundle", "type": "searchset", "total": 0, "entry": []})
+    return _json_response(
+        {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": 1,
+            "entry": [{"resource": authz.task}],
+        }
+    )
 
 
 @app.put("/fhir/Task/{task_id}")

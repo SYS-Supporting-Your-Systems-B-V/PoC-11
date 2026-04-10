@@ -570,31 +570,54 @@ OPENAPI_EXAMPLE_CAPABILITY_MAPPING_RESPONSE = {
 
 OPENAPI_EXAMPLE_BGZ_PREVIEW_TASK = {
     "resourceType": "Task",
-    "id": "notification-task-preview",
-    "status": "requested",
-    "intent": "order",
-    "description": "BgZ notified pull demo",
-    "focus": {"reference": "Task/workflow-task-123"},
-    "for": {"reference": "Patient/patient-demo", "display": "J.P. van der Berg"},
-    "owner": {"reference": "Organization/456", "display": "Ziekenhuis Oost"},
-    "extension": [
+    "basedOn": [
         {
-            "url": "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-healthcareservice",
-            "valueReference": {
-                "reference": "HealthcareService/123",
-                "display": "Poli Cardiologie",
-            },
+            "identifier": {
+                "system": "urn:ietf:rfc:3986",
+                "value": "urn:uuid:11111111-1111-1111-1111-111111111111",
+            }
         }
     ],
+    "status": "requested",
+    "intent": "proposal",
+    "code": {
+        "coding": [
+            {
+                "system": "http://fhir.nl/fhir/NamingSystem/TaskCode",
+                "code": "pull-notification",
+            }
+        ]
+    },
+    "owner": {
+        "identifier": {
+            "system": "http://fhir.nl/fhir/NamingSystem/ura",
+            "value": "87654321",
+        }
+    },
     "requester": {
         "agent": {
-            "reference": "Organization/organization-sender",
-            "display": "Ziekenhuis West",
+            "identifier": {
+                "system": "urn:ietf:rfc:3986",
+                "value": "urn:oid:2.16.528.1.1007.3.2.1234567",
+            }
+        },
+        "onBehalfOf": {
+            "identifier": {
+                "system": "http://fhir.nl/fhir/NamingSystem/ura",
+                "value": "12345678",
+            }
         }
     },
     "input": [
         {
-            "type": {"text": "authorizationBase"},
+            "type": {
+                "coding": [
+                    {
+                        "system": "http://fhir.nl/fhir/NamingSystem/TaskParameter",
+                        "code": "authorization-base",
+                    }
+                ]
+            },
             "valueString": "M2Q0ZDU2NzgtYWJjZA==",
         }
     ],
@@ -2897,6 +2920,9 @@ class BgzNotifyResponseModel(BaseModel):
     task_status: Optional[str] = None
     group_identifier: Optional[str] = None
     workflow_task_id: Optional[str] = None
+    workflow_task_identifier_system: Optional[str] = None
+    workflow_task_identifier_value: Optional[str] = None
+    authorization_base: Optional[str] = None
     sender_bgz_base: Optional[str] = None
     resolved_receiver_base: Optional[str] = None
 
@@ -2910,6 +2936,9 @@ class BgzTaskPreviewResponseModel(BaseModel):
     resolved_receiver_base: Optional[str] = None
     notification_endpoint_id: Optional[str] = None
     workflow_task_id: Optional[str] = None
+    workflow_task_identifier_system: Optional[str] = None
+    workflow_task_identifier_value: Optional[str] = None
+    authorization_base: Optional[str] = None
 
 
 class BgzLoadDataDetailModel(BaseModel):
@@ -3674,6 +3703,8 @@ IG_CAPABILITY_SYSTEM = "http://nuts-foundation.github.io/nl-generic-functions-ig
 # PoC 9 extension: explicit sender BgZ FHIR base URL for receivers that do not resolve sender endpoints via URA/mCSD.
 TASK_EXT_SENDER_BGZ_BASE_URL = "http://example.org/fhir/StructureDefinition/sender-bgz-base"
 TASK_IDENTIFIER_AUTHORIZATION_BASE_SYSTEM = "https://sys.local/fhir/NamingSystem/task-authorization-base"
+TASK_IDENTIFIER_RFC3986_SYSTEM = "urn:ietf:rfc:3986"
+SENDER_SOFTWARE_IDENTIFIER_PATTERN = re.compile(r"^urn:(oid|uuid):.+$", re.IGNORECASE)
 
 # NL Generic Functions: extensions to support routing references on FHIR STU3 Task
 # - Location for Task in STU3
@@ -3755,6 +3786,27 @@ def _normalize_relative_ref(ref: Optional[str]) -> str:
     if len(parts) >= 2:
         return parts[-2] + "/" + parts[-1]
     return r
+
+
+def _validate_sender_software_identifier(value: str, *, error_status_code: int = 500) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise HTTPException(
+            status_code=error_status_code,
+            detail={
+                "reason": "misconfigured",
+                "message": "MCSD_SENDER_UZI_SYS is niet ingesteld.",
+            },
+        )
+    if not SENDER_SOFTWARE_IDENTIFIER_PATTERN.match(raw):
+        raise HTTPException(
+            status_code=error_status_code,
+            detail={
+                "reason": "misconfigured",
+                "message": "MCSD_SENDER_UZI_SYS moet een RFC3986 URN zijn (urn:oid:... of urn:uuid:...).",
+            },
+        )
+    return raw
 
 
 @app.get(
@@ -4209,7 +4261,7 @@ class BgzNotifyRequest(BaseModel):
     patient_bsn: str = Field(..., max_length=32, description="Patient BSN")
     patient_name: str | None = Field(None, max_length=128, description="Patient display name (optional)")
     description: str | None = Field(None, max_length=256, description="Notification description (optional)")
-    workflow_task_id: str | None = Field(None, max_length=64, description="Workflow Task logical id (optional). If omitted, server generates one and sets Task.basedOn to Task/<id>.")
+    workflow_task_id: str | None = Field(None, max_length=64, description="Workflow Task resource id op de sender (optional). If omitted, server generates one.")
 
 @lru_cache(maxsize=2)
 def _load_bgz_template(filename: str) -> dict:
@@ -4240,16 +4292,11 @@ def _validate_notification_task_template() -> None:
 
     # Probeer een minimale build om paden zeker te stellen.
     tb = TaskBuilder(template)
-    now = datetime.now(timezone.utc)
-    tb.set_group_identifier(f"urn:uuid:{uuid.uuid4()}")
-    tb.set_task_identifier(f"urn:uuid:{uuid.uuid4()}")
-    tb.set_authored_on(now)
-    tb.set_restriction_end(now + timedelta(days=1))
     # Dummy values (worden tijdens runtime overschreven)
-    tb.set_requester_agent(uzi_sys="DUMMY", system_name="DUMMY")
-    tb.set_sender(ura="DUMMY", display="DUMMY")
+    tb.set_based_on_identifier(system=TASK_IDENTIFIER_RFC3986_SYSTEM, value=f"urn:uuid:{uuid.uuid4()}")
+    tb.set_requester_agent(uzi_sys="urn:uuid:00000000-0000-0000-0000-000000000000")
+    tb.set_sender(ura="DUMMY")
     tb.set_receiver_owner_identifier(ura="DUMMY")
-    tb.set_patient(bsn="DUMMY")
     tb.set_authorization_base("DUMMY")
     # Valideer constraints per TA spec
     tb.validate_fhir_constraints(allow_missing_refs=True)
@@ -4384,9 +4431,6 @@ class TaskBuilder:
         # Ensure all paths we write to
         self.group_identifier = _ensure_dict(self.task, "groupIdentifier")
 
-        ident_list = _ensure_list(self.task, "identifier")
-        _ensure_list_item(ident_list, 0, {"system": "urn:ietf:rfc:3986", "value": ""})
-
         self.restriction = _ensure_dict(self.task, "restriction")
         self.restriction_period = _ensure_dict(self.restriction, "period")
 
@@ -4419,16 +4463,22 @@ class TaskBuilder:
     def set_restriction_end(self, dt: datetime) -> None:
         self.restriction_period["end"] = dt.isoformat()
 
-    def set_sender(self, *, ura: str, display: str) -> None:
+    def set_sender(self, *, ura: str, display: Optional[str] = None) -> None:
         self.requester_on_behalf_ident["value"] = str(ura)
-        self.requester_on_behalf["display"] = str(display)
+        if display is not None:
+            self.requester_on_behalf["display"] = str(display)
+        else:
+            self.requester_on_behalf.pop("display", None)
 
-    def set_requester_agent(self, *, uzi_sys: str, system_name: str) -> None:
+    def set_requester_agent(self, *, uzi_sys: str, system_name: Optional[str] = None) -> None:
         """Set requester.agent identifier (sending system identity)."""
         agent = _ensure_dict(self.requester, "agent")
         agent_ident = _ensure_dict(agent, "identifier")
         agent_ident["value"] = str(uzi_sys)
-        agent["display"] = str(system_name)
+        if system_name is not None:
+            agent["display"] = str(system_name)
+        else:
+            agent.pop("display", None)
 
     def set_authorization_base(self, value: str) -> None:
         """Set input:authorization-base value."""
@@ -4654,10 +4704,47 @@ class TaskBuilder:
         if display is not None:
             first["display"] = str(display)
 
+    def set_based_on_identifier(self, *, system: str, value: str) -> None:
+        self.task.setdefault("basedOn", [])
+        based_on_list = _ensure_list(self.task, "basedOn")
+        first = _ensure_list_item(based_on_list, 0, default={})
+        if not isinstance(first, dict):
+            first = {}
+            based_on_list[0] = first
+        identifier = _ensure_dict(first, "identifier")
+        identifier["system"] = str(system)
+        identifier["value"] = str(value)
+        first.pop("reference", None)
+        first.pop("display", None)
+
+    def _prune_empty_containers(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            out: Dict[str, Any] = {}
+            for key, item in value.items():
+                pruned = self._prune_empty_containers(item)
+                if isinstance(pruned, dict) and not pruned:
+                    continue
+                if isinstance(pruned, list) and not pruned:
+                    continue
+                out[key] = pruned
+            return out
+        if isinstance(value, list):
+            out_list = []
+            for item in value:
+                pruned = self._prune_empty_containers(item)
+                if isinstance(pruned, dict) and not pruned:
+                    continue
+                if isinstance(pruned, list) and not pruned:
+                    continue
+                out_list.append(pruned)
+            return out_list
+        return value
+
     def build(self) -> Dict[str, Any]:
         # Ensure resourceType is Task
         if self.task.get("resourceType") != "Task":
             self.task["resourceType"] = "Task"
+        self.task = self._prune_empty_containers(self.task)
         return self.task
 
 
@@ -4879,15 +4966,16 @@ def _build_bgz_notification_task(
     patient_name: str | None,
     description: str | None,
     workflow_task_id: str | None = None,
-) -> tuple[Dict[str, Any], str | None, str]:
+) -> tuple[Dict[str, Any], str | None, str, str]:
     """Build a Notification Task per TA Notified Pull v1.0.1 spec.
 
-    Per spec, the Task only contains identifiers (URA/BSN), not references or display names.
+    For PoC 9 step 2 we emit the minimal STU3 shape with:
+    - basedOn.identifier pointing at the sender workflow-task identifier
+    - requester/owner identifiers only
+    - authorization-base in Task.input
     """
     template = _load_bgz_template("notification-task.json")
     tb = TaskBuilder(template)
-    tb.set_group_identifier(f"urn:uuid:{uuid.uuid4()}")
-    tb.set_task_identifier(f"urn:uuid:{uuid.uuid4()}")
     workflow_task_id_norm = (workflow_task_id or "").strip()
     workflow_task_logical_id = ""
     if workflow_task_id_norm:
@@ -4901,120 +4989,28 @@ def _build_bgz_notification_task(
     if not workflow_task_logical_id:
         workflow_task_logical_id = str(uuid.uuid4())
     workflow_task_id_norm = workflow_task_logical_id
-    workflow_task_ref = f"Task/{workflow_task_logical_id}"
-    tb.set_based_on_reference(workflow_task_ref)
-    now = datetime.now(timezone.utc)
-    tb.set_authored_on(now)
-    tb.set_restriction_end(now + timedelta(days=365))
+    workflow_task_identifier_value = f"urn:uuid:{uuid.uuid4()}"
+    tb.set_based_on_identifier(system=TASK_IDENTIFIER_RFC3986_SYSTEM, value=workflow_task_identifier_value)
 
     # Requester: sending system (agent) and organization (onBehalfOf)
-    tb.set_requester_agent(uzi_sys=sender_uzi_sys, system_name=sender_system_name)
-    tb.set_sender(ura=sender_ura, display=sender_name)
+    tb.set_requester_agent(uzi_sys=sender_uzi_sys)
+    tb.set_sender(ura=sender_ura)
     sender_bgz_public_base_norm = _normalize_fhir_base(sender_bgz_public_base) if sender_bgz_public_base else ""
     if sender_bgz_public_base_norm:
         sender_bgz_public_base_norm = _validate_http_base_url(
             sender_bgz_public_base_norm,
             field_name="sender_bgz_public_base",
         )
-        tb.set_sender_bgz_base_extension(ext_url=TASK_EXT_SENDER_BGZ_BASE_URL, base_url=sender_bgz_public_base_norm)
     tb.set_receiver_owner_identifier(ura=receiver_ura)
-
-    receiver_org_name_norm = (receiver_org_name or "").strip()
-    effective_org_ref_norm = (receiver_effective_org_ref_norm or "").strip() or None
-    if effective_org_ref_norm:
-        effective_org_ref_norm = _normalize_relative_ref(effective_org_ref_norm)
-        if not effective_org_ref_norm.startswith("Organization/"):
-            effective_org_ref_norm = None
-    effective_org_name_norm = (receiver_effective_org_name or "").strip()
-    if not effective_org_name_norm:
-        effective_org_name_norm = receiver_org_name_norm
-
-    # Normalize target hints (used for STU3 routing extensions)
-    target_display_norm = (receiver_target_display or "").strip() or None
-    target_identifier = _pick_author_assigned_identifier(receiver_target_identifiers or [])
-
-    target_ref = receiver_target_ref_norm or receiver_org_ref_norm
-    target_type = target_ref.split("/", 1)[0] if target_ref and "/" in target_ref else ""
-    if target_type not in ("Location", "Organization", "HealthcareService"):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason": "invalid_reference",
-                "message": "receiver_target_ref moet verwijzen naar Location, Organization of HealthcareService.",
-            },
-        )
-
-    # Compute the Task routing information that the receiver will see:
-    # - Organization target -> Task.owner = Organization
-    # - Location target (onderdeel) -> Task.extension(task-stu3-location)
-    # - HealthcareService target (onderdeel) -> Task.extension(task-stu3-healthcareservice)
-    #
-    # NOTE: For STU3, these routing references SHOULD include an author-assigned identifier
-    # (Reference.identifier). We add it when the directory returns one.
-    owner_ref_used: Optional[str] = None
-
-    # Ensure we don't leak R4-only fields into a STU3 Task.
-    tb.task.pop("location", None)
-    # Clear routing extensions first (idempotent builds)
-    tb.set_task_stu3_location_extension("", display=None, identifier=None)
-    tb.set_task_stu3_healthcareservice_extension("", display=None, identifier=None)
-
-    if target_type == "Location":
-        if not target_identifier:
-            logger.warning(
-                "Building STU3 Task with task-stu3-location extension but without Reference.identifier (target=%s)",
-                target_ref,
-            )
-        tb.set_task_stu3_location_extension(
-            target_ref,
-            display=(target_display_norm or receiver_name),
-            identifier=target_identifier,
-        )
-        owner_ref_used = effective_org_ref_norm or receiver_org_ref_norm
-        if owner_ref_used:
-            tb.set_owner_reference(owner_ref_used, display=(effective_org_name_norm or receiver_org_name_norm or receiver_name))
-        else:
-            tb.set_owner_reference("", display=receiver_name)
-    elif target_type == "Organization":
-        owner_ref_used = target_ref
-        tb.set_owner_reference(owner_ref_used, display=receiver_name)
-    elif target_type == "HealthcareService":
-        if not target_identifier:
-            logger.warning(
-                "Building STU3 Task with task-stu3-healthcareservice extension but without Reference.identifier (target=%s)",
-                target_ref,
-            )
-        tb.set_task_stu3_healthcareservice_extension(
-            target_ref,
-            display=(target_display_norm or receiver_name),
-            identifier=target_identifier,
-        )
-
-        owner_ref_used = effective_org_ref_norm or receiver_org_ref_norm
-        if owner_ref_used:
-            # If we mapped HealthcareService -> Organization, use the org name as display (if known).
-            if owner_ref_used.startswith("Organization/") and (effective_org_name_norm or receiver_org_name_norm):
-                tb.set_owner_reference(owner_ref_used, display=(effective_org_name_norm or receiver_org_name_norm))
-            else:
-                tb.set_owner_reference(owner_ref_used, display=receiver_name)
-        else:
-            # Owner identifier is still present (URA), but we don't have a resolvable Organization/<id>.
-            tb.set_owner_reference("", display=receiver_name)
-
-    # Patient and description
-    tb.set_patient(bsn=patient_bsn, display=patient_name)
-    tb.set_description(description)
-    tb.validate_fhir_constraints(allow_missing_refs=(target_type in ("Location", "HealthcareService") and not owner_ref_used))
-    # Authorization base for the pull
     tb.set_authorization_base(authorization_base)
-    tb.set_get_workflow_task(True)
-    _keep_task_inputs(task=tb.task, allowed_taskparameter_codes={"authorization-base", "get-workflow-task"})
+    _keep_task_inputs(task=tb.task, allowed_taskparameter_codes={"authorization-base"})
     task = tb.build()
-    return task, (sender_bgz_public_base_norm or None), workflow_task_id_norm
+    return task, (sender_bgz_public_base_norm or None), workflow_task_id_norm, workflow_task_identifier_value
 
 def _build_bgz_workflow_task(
     *,
     workflow_task_id: str,
+    workflow_task_identifier_value: str,
     group_identifier: str,
     authorization_base: str,
     sender_ura: str,
@@ -5032,7 +5028,7 @@ def _build_bgz_workflow_task(
     tb.task["id"] = str(workflow_task_id)
     if group_identifier:
         tb.set_group_identifier(str(group_identifier))
-    tb.set_task_identifier(f"urn:uuid:{uuid.uuid4()}")
+    tb.set_task_identifier(str(workflow_task_identifier_value))
     tb.set_authorization_base(str(authorization_base))
     identifier_list = _ensure_list(tb.task, "identifier")
     identifier_list[:] = [
@@ -5343,12 +5339,12 @@ async def bgz_preflight(
             detail={"reason": "misconfigured", "message": "MCSD_SENDER_URA en/of MCSD_SENDER_NAME is niet ingesteld."},
         )
 
-    sender_uzi_sys = (settings.sender_uzi_sys or "").strip()
+    sender_uzi_sys = _validate_sender_software_identifier((settings.sender_uzi_sys or "").strip())
     sender_system_name = (settings.sender_system_name or "").strip()
-    if not sender_uzi_sys or not sender_system_name:
+    if not sender_system_name:
         raise HTTPException(
             status_code=500,
-            detail={"reason": "misconfigured", "message": "MCSD_SENDER_UZI_SYS en/of MCSD_SENDER_SYSTEM_NAME is niet ingesteld."},
+            detail={"reason": "misconfigured", "message": "MCSD_SENDER_SYSTEM_NAME is niet ingesteld."},
         )
     _sender_bgz_public_base, sender_bgz_storage_base = _resolve_sender_bgz_bases()
     sender_bgz_storage_base_norm = _normalize_fhir_base(sender_bgz_storage_base or "")
@@ -5581,7 +5577,7 @@ async def bgz_task_preview(
 
     sender_ura = (settings.sender_ura or "").strip()
     sender_name = (settings.sender_name or "").strip()
-    sender_uzi_sys = (settings.sender_uzi_sys or "").strip()
+    sender_uzi_sys = _validate_sender_software_identifier((settings.sender_uzi_sys or "").strip())
     sender_system_name = (settings.sender_system_name or "").strip()
     sender_bgz_public_base, _sender_bgz_storage_base = _resolve_sender_bgz_bases()
 
@@ -5590,10 +5586,10 @@ async def bgz_task_preview(
             status_code=500,
             detail={"reason": "misconfigured", "message": "MCSD_SENDER_URA en/of MCSD_SENDER_NAME is niet ingesteld."},
         )
-    if not sender_uzi_sys or not sender_system_name:
+    if not sender_system_name:
         raise HTTPException(
             status_code=500,
-            detail={"reason": "misconfigured", "message": "MCSD_SENDER_UZI_SYS en/of MCSD_SENDER_SYSTEM_NAME is niet ingesteld."},
+            detail={"reason": "misconfigured", "message": "MCSD_SENDER_SYSTEM_NAME is niet ingesteld."},
         )
 
     client_receiver_ura = (payload.receiver_ura or "").strip()
@@ -5641,7 +5637,7 @@ async def bgz_task_preview(
 
     authorization_base = base64.b64encode(str(uuid.uuid4()).encode()).decode()
 
-    task, sender_bgz_base_norm, workflow_task_id_norm = _build_bgz_notification_task(
+    task, sender_bgz_base_norm, workflow_task_id_norm, workflow_task_identifier_value = _build_bgz_notification_task(
         sender_ura=sender_ura,
         sender_name=sender_name,
         sender_uzi_sys=sender_uzi_sys,
@@ -5675,7 +5671,7 @@ async def bgz_task_preview(
         receiver_org_ref=receiver_org_ref_norm,
         resolved_receiver_base=receiver_base_norm,
         notification_endpoint_id=(str(resolved_notification_endpoint_id) if resolved_notification_endpoint_id else None),
-        task_group_identifier=(task.get("groupIdentifier") or {}).get("value"),
+        task_group_identifier=None,
         patient=_audit_hash(patient_bsn),
     )
 
@@ -5686,6 +5682,9 @@ async def bgz_task_preview(
         "resolved_receiver_base": receiver_base_norm,
         "notification_endpoint_id": (str(resolved_notification_endpoint_id) if resolved_notification_endpoint_id else None),
         "workflow_task_id": workflow_task_id_norm,
+        "workflow_task_identifier_system": TASK_IDENTIFIER_RFC3986_SYSTEM,
+        "workflow_task_identifier_value": workflow_task_identifier_value,
+        "authorization_base": authorization_base,
     }
 
 
@@ -5719,7 +5718,7 @@ async def bgz_notify(
     """
     sender_ura = (settings.sender_ura or "").strip()
     sender_name = (settings.sender_name or "").strip()
-    sender_uzi_sys = (settings.sender_uzi_sys or "").strip()
+    sender_uzi_sys = _validate_sender_software_identifier((settings.sender_uzi_sys or "").strip())
     sender_system_name = (settings.sender_system_name or "").strip()
     sender_bgz_public_base, sender_bgz_storage_base = _resolve_sender_bgz_bases()
 
@@ -5728,10 +5727,10 @@ async def bgz_notify(
             status_code=500,
             detail={"reason": "misconfigured", "message": "MCSD_SENDER_URA en/of MCSD_SENDER_NAME is niet ingesteld."},
         )
-    if not sender_uzi_sys or not sender_system_name:
+    if not sender_system_name:
         raise HTTPException(
             status_code=500,
-            detail={"reason": "misconfigured", "message": "MCSD_SENDER_UZI_SYS en/of MCSD_SENDER_SYSTEM_NAME is niet ingesteld."},
+            detail={"reason": "misconfigured", "message": "MCSD_SENDER_SYSTEM_NAME is niet ingesteld."},
         )
 
     client_receiver_ura = (payload.receiver_ura or "").strip()
@@ -5780,7 +5779,7 @@ async def bgz_notify(
 
     authorization_base = base64.b64encode(str(uuid.uuid4()).encode()).decode()
 
-    task, sender_bgz_base_norm, workflow_task_id_norm = _build_bgz_notification_task(
+    task, sender_bgz_base_norm, workflow_task_id_norm, workflow_task_identifier_value = _build_bgz_notification_task(
         sender_ura=sender_ura,
         sender_name=sender_name,
         sender_uzi_sys=sender_uzi_sys,
@@ -5819,9 +5818,10 @@ async def bgz_notify(
                 ),
             },
         )
-    task_group_identifier = (task.get("groupIdentifier") or {}).get("value") or ""
+    task_group_identifier = f"urn:uuid:{uuid.uuid4()}"
     workflow_task = _build_bgz_workflow_task(
         workflow_task_id=workflow_task_id_norm,
+        workflow_task_identifier_value=workflow_task_identifier_value,
         group_identifier=task_group_identifier,
         authorization_base=authorization_base,
         sender_ura=sender_ura,
@@ -5839,15 +5839,6 @@ async def bgz_notify(
     )
     if workflow_task_id_actual and workflow_task_id_actual != workflow_task_id_norm:
         workflow_task_id_norm = workflow_task_id_actual
-        try:
-            based_on = task.get("basedOn")
-            if isinstance(based_on, list) and based_on:
-                if isinstance(based_on[0], dict):
-                    based_on[0]["reference"] = f"Task/{workflow_task_id_actual}"
-            elif isinstance(based_on, dict):
-                based_on["reference"] = f"Task/{workflow_task_id_actual}"
-        except Exception:
-            pass
     patient_hash = _audit_hash(patient_bsn)
     audit_event(
         "bgz.notify.attempt",
@@ -5895,10 +5886,13 @@ async def bgz_notify(
             "target": target_url,
             "task_id": result.get("id"),
             "task_status": result.get("status"),
-            "group_identifier": (task.get("groupIdentifier") or {}).get("value"),
+            "group_identifier": task_group_identifier,
             "sender_bgz_base": sender_bgz_base_norm or None,
             "resolved_receiver_base": receiver_base_norm,
             "workflow_task_id": workflow_task_id_norm,
+            "workflow_task_identifier_system": TASK_IDENTIFIER_RFC3986_SYSTEM,
+            "workflow_task_identifier_value": workflow_task_identifier_value,
+            "authorization_base": authorization_base,
         }
     except httpx.HTTPStatusError as e:
         # Receiver gaf een HTTP fout terug (4xx/5xx). Log zoveel mogelijk context voor troubleshooting.

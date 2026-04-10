@@ -98,6 +98,10 @@ def _workflow_task(appmod, *, status: str = "requested") -> Dict[str, Any]:
         },
         "identifier": [
             {
+                "system": "urn:ietf:rfc:3986",
+                "value": "urn:uuid:11111111-1111-1111-1111-111111111111",
+            },
+            {
                 "system": appmod.settings.authorization_base_system,
                 "value": "auth-123",
             }
@@ -318,6 +322,67 @@ def test_task_read_rejects_authorization_base_header_mismatch(monkeypatch):
 
     assert response.status_code == 403
     assert response.json()["detail"]["reason"] == "authorization_base_mismatch"
+
+
+def test_task_search_authorized_by_identifier(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get(
+            "/fhir/Task?identifier=urn:ietf:rfc:3986|urn:uuid:11111111-1111-1111-1111-111111111111",
+            headers=_auth_headers(),
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["resourceType"] == "Bundle"
+    assert body["total"] == 1
+    assert body["entry"][0]["resource"]["id"] == "wf-1"
+
+
+def test_task_search_returns_empty_bundle_for_identifier_mismatch(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get(
+            "/fhir/Task?identifier=urn:ietf:rfc:3986|urn:uuid:22222222-2222-2222-2222-222222222222",
+            headers=_auth_headers(),
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["resourceType"] == "Bundle"
+    assert body["total"] == 0
+    assert body["entry"] == []
+
+
+def test_task_search_requires_identifier_query(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+
+    with TestClient(appmod.app) as client:
+        response = client.get("/fhir/Task", headers=_auth_headers())
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["reason"] == "missing_task_identifier"
 
 
 def test_patient_search_requires_employee_claims_from_introspection(monkeypatch):

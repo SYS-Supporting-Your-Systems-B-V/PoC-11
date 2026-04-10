@@ -264,7 +264,7 @@ Om spoofing vanuit het frontend te voorkomen komen sender-waarden uit environmen
 
 - `MCSD_SENDER_URA` — **verplicht**
 - `MCSD_SENDER_NAME` — **verplicht**
-- `MCSD_SENDER_UZI_SYS` — **verplicht** (identifier.system van de requester/agent)
+- `MCSD_SENDER_UZI_SYS` — **verplicht** (`requester.agent.identifier.value`; moet een RFC3986 URN zijn, bijvoorbeeld `urn:oid:...` of `urn:uuid:...`)
 - `MCSD_SENDER_SYSTEM_NAME` — **verplicht** (displaynaam van de requester/agent)
 - `MCSD_SENDER_BGZ_BASE` — **verplicht voor verzenden** (nodig voor `POST /bgz/preflight` en `POST /bgz/notify`, om de Workflow Task te hosten)
 
@@ -859,7 +859,10 @@ Response (globaal):
 - `task`: de JSON Task die verstuurd zou worden
 - `resolved_receiver_base`: de resolved base URL
 - `notification_endpoint_id`: het gekozen/geresolveerde notification Endpoint.id
-- `workflow_task_id`: de workflow task id (zoals in `Task.basedOn`)
+- `workflow_task_id`: de workflow-task resource id op de sender
+- `workflow_task_identifier_system`: identifier system uit `Task.basedOn[0].identifier`
+- `workflow_task_identifier_value`: identifier value uit `Task.basedOn[0].identifier`
+- `authorization_base`: authorization-base die ook op de workflow task wordt opgeslagen
 - `sender_bgz_base`: de sender base (als gezet)
 
 Voorbeeldresponse:
@@ -869,31 +872,53 @@ Voorbeeldresponse:
   "success": true,
   "task": {
     "resourceType": "Task",
-    "id": "notification-task-preview",
+    "basedOn": [
+      {
+        "identifier": {
+          "system": "urn:ietf:rfc:3986",
+          "value": "urn:uuid:11111111-1111-1111-1111-111111111111"
+        }
+      }
+    ],
     "status": "requested",
-    "intent": "order",
-    "description": "BgZ notified pull demo",
-    "focus": {
-      "reference": "Task/workflow-task-123"
-    },
-    "for": {
-      "reference": "Patient/patient-demo",
-      "display": "J.P. van der Berg"
+    "intent": "proposal",
+    "code": {
+      "coding": [
+        {
+          "system": "http://fhir.nl/fhir/NamingSystem/TaskCode",
+          "code": "pull-notification"
+        }
+      ]
     },
     "owner": {
-      "reference": "HealthcareService/123",
-      "display": "Poli Cardiologie"
+      "identifier": {
+        "system": "http://fhir.nl/fhir/NamingSystem/ura",
+        "value": "87654321"
+      }
     },
     "requester": {
       "agent": {
-        "reference": "Organization/organization-sender",
-        "display": "Ziekenhuis West"
+        "identifier": {
+          "system": "urn:ietf:rfc:3986",
+          "value": "urn:oid:2.16.528.1.1007.3.2.1234567"
+        }
+      },
+      "onBehalfOf": {
+        "identifier": {
+          "system": "http://fhir.nl/fhir/NamingSystem/ura",
+          "value": "12345678"
+        }
       }
     },
     "input": [
       {
         "type": {
-          "text": "authorizationBase"
+          "coding": [
+            {
+              "system": "http://fhir.nl/fhir/NamingSystem/TaskParameter",
+              "code": "authorization-base"
+            }
+          ]
         },
         "valueString": "M2Q0ZDU2NzgtYWJjZA=="
       }
@@ -902,7 +927,10 @@ Voorbeeldresponse:
   "sender_bgz_base": "https://sender.example/fhir",
   "resolved_receiver_base": "https://receiver.example/fhir",
   "notification_endpoint_id": "789",
-  "workflow_task_id": "workflow-task-123"
+  "workflow_task_id": "workflow-task-123",
+  "workflow_task_identifier_system": "urn:ietf:rfc:3986",
+  "workflow_task_identifier_value": "urn:uuid:11111111-1111-1111-1111-111111111111",
+  "authorization_base": "M2Q0ZDU2NzgtYWJjZA=="
 }
 ```
 
@@ -917,10 +945,16 @@ De sender-identiteit komt uit environment variabelen (zie “BgZ sender-identite
 1. **Workflow Task aanmaken** — De backend bouwt een Workflow Task (met BgZ queries/resources in `Task.input`) en slaat deze op op de sender’s FHIR server (`MCSD_SENDER_BGZ_BASE`) via `PUT /Task/{id}` (met fallback naar `POST /Task` als de server geen client-assigned ids accepteert).
 2. **Notification Task versturen** — De backend POST de notification Task naar `{receiver_notification_base}/Task`.
 
+De notification Task zelf gebruikt de minimale Step 2 shape:
+- `basedOn[0].identifier` verwijst naar de primaire workflow-task identifier van de sender
+- `input.authorization-base` blijft aanwezig voor de follow-up pull en gateway-autorisatie
+- velden zoals `description`, `for`, sender BgZ extension en `get-workflow-task` worden niet meer meegestuurd
+
 Voor PoC 11-13 geldt daarnaast:
 
 - `MCSD_SENDER_UZI_SYS` en `MCSD_SENDER_SYSTEM_NAME` zijn verplicht
-- `MCSD_SENDER_BGZ_PUBLIC_BASE` wordt gebruikt voor de publieke sender URL in de notification Task
+- `MCSD_SENDER_UZI_SYS` moet een RFC3986 URN zijn (`urn:oid:...` of `urn:uuid:...`)
+- `MCSD_SENDER_BGZ_PUBLIC_BASE` wordt alleen nog als response-metadata teruggegeven
 - `MCSD_SENDER_BGZ_STORAGE_BASE` wordt gebruikt voor de interne workflow-task opslag op de sender FHIR server
 - `MCSD_SENDER_BGZ_BASE` wordt alleen nog als legacy fallback gebruikt
 

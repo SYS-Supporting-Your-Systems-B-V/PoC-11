@@ -1,19 +1,11 @@
 {
   "resourceType": "Task",
-  "id": "notification-task-bgz",
-  "meta": {
-    "profile": [
-      "http://fhir.nl/fhir/StructureDefinition/nl-vzvz-TaskNotifiedPull"
-    ]
-  },
-  "groupIdentifier": {
-    "system": "urn:ietf:rfc:3986",
-    "value": "DYNAMIC:generated_uuid"
-  },
-  "identifier": [
+  "basedOn": [
     {
-      "system": "urn:ietf:rfc:3986",
-      "value": "DYNAMIC:generated_uuid"
+      "identifier": {
+        "system": "urn:ietf:rfc:3986",
+        "value": "DYNAMIC:workflow_task_identifier"
+      }
     }
   ],
   "status": "requested",
@@ -22,39 +14,22 @@
     "coding": [
       {
         "system": "http://fhir.nl/fhir/NamingSystem/TaskCode",
-        "code": "pull-notification",
-        "display": "Pull Notification"
+        "code": "pull-notification"
       }
     ]
   },
-  "description": "DYNAMIC:description_from_request_or_default",
-  "restriction": {
-    "period": {
-      "end": "DYNAMIC:now_plus_365_days"
-    }
-  },
-  "for": {
-    "identifier": {
-      "system": "http://fhir.nl/fhir/NamingSystem/bsn",
-      "value": "DYNAMIC:patient_bsn"
-    },
-    "display": "DYNAMIC:patient_name"
-  },
-  "authoredOn": "DYNAMIC:current_timestamp",
   "requester": {
     "agent": {
       "identifier": {
-        "system": "http://fhir.nl/fhir/NamingSystem/uzi-nr-sys",
+        "system": "urn:ietf:rfc:3986",
         "value": "DYNAMIC:env.MCSD_SENDER_UZI_SYS"
-      },
-      "display": "DYNAMIC:env.MCSD_SENDER_SYSTEM_NAME"
+      }
     },
     "onBehalfOf": {
       "identifier": {
         "system": "http://fhir.nl/fhir/NamingSystem/ura",
         "value": "DYNAMIC:env.MCSD_SENDER_URA"
-      },
-      "display": "DYNAMIC:env.MCSD_SENDER_NAME"
+      }
     }
   },
   "owner": {
@@ -74,17 +49,6 @@
         ]
       },
       "valueString": "DYNAMIC:authorization_base"
-    },
-    {
-      "type": {
-        "coding": [
-          {
-            "system": "http://fhir.nl/fhir/NamingSystem/TaskParameter",
-            "code": "get-workflow-task"
-          }
-        ]
-      },
-      "valueBoolean": true
     }
   ]
 }

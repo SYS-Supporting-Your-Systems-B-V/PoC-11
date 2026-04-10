@@ -45,8 +45,21 @@ def _task_payload(sender_ura: str = "12345678") -> dict:
     return {
         "resourceType": "Task",
         "status": "requested",
-        "basedOn": [{"reference": "Task/wf-123"}],
+        "basedOn": [
+            {
+                "identifier": {
+                    "system": "urn:ietf:rfc:3986",
+                    "value": "urn:uuid:11111111-1111-1111-1111-111111111111",
+                }
+            }
+        ],
         "requester": {
+            "agent": {
+                "identifier": {
+                    "system": "urn:ietf:rfc:3986",
+                    "value": "urn:oid:2.16.528.1.1007.3.2.1234567",
+                }
+            },
             "onBehalfOf": {
                 "identifier": {
                     "system": "http://fhir.nl/fhir/NamingSystem/ura",
@@ -60,12 +73,6 @@ def _task_payload(sender_ura: str = "12345678") -> dict:
                 "value": "87654321",
             }
         },
-        "for": {
-            "identifier": {
-                "system": "http://fhir.nl/fhir/NamingSystem/bsn",
-                "value": "999999990",
-            }
-        },
         "input": [
             {
                 "type": {
@@ -77,12 +84,6 @@ def _task_payload(sender_ura: str = "12345678") -> dict:
                     ]
                 },
                 "valueString": "auth-123",
-            }
-        ],
-        "extension": [
-            {
-                "url": "http://example.org/fhir/StructureDefinition/sender-bgz-base",
-                "valueUrl": "https://mach2.disyepd.com/notifiedpull/fhir",
             }
         ],
     }
@@ -143,11 +144,14 @@ def test_post_task_is_stored_and_summarized(monkeypatch):
         latest = client.get("/debug/tasks/latest-summary")
         assert latest.status_code == 200
         summary = latest.json()
-        assert summary["based_on"] == "Task/wf-123"
+        assert summary["based_on"] == "urn:uuid:11111111-1111-1111-1111-111111111111"
+        assert summary["based_on_identifier_system"] == "urn:ietf:rfc:3986"
+        assert summary["based_on_identifier_value"] == "urn:uuid:11111111-1111-1111-1111-111111111111"
+        assert summary["based_on_reference"] is None
         assert summary["authorization_base"] == "auth-123"
-        assert summary["sender_bgz_base"] == "https://mach2.disyepd.com/notifiedpull/fhir"
+        assert summary["sender_bgz_base"] is None
         assert summary["owner_ura"] == "87654321"
-        assert summary["patient_bsn"] == "999999990"
+        assert summary["patient_bsn"] is None
         assert summary["sender_ura"] == "12345678"
 
         task_read = client.get(f"/fhir/Task/{created['id']}")
@@ -209,6 +213,33 @@ def test_post_task_accepts_matching_token_subject_id_fallback(monkeypatch):
         )
 
     assert response.status_code == 201, response.text
+
+
+def test_post_task_rejects_when_owner_ura_does_not_match_receiver(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    async def _fake_introspect(_token: str):
+        return appmod.TokenContext(
+            raw={},
+            active=True,
+            organization_ura="12345678",
+            scopes=["eOverdracht-receiver"],
+        )
+
+    monkeypatch.setattr(appmod, "_introspect_token", _fake_introspect)
+    payload = _task_payload()
+    payload["owner"]["identifier"]["value"] = "00000000"
+
+    with TestClient(appmod.app) as client:
+        response = client.post(
+            "/fhir/Task",
+            json=payload,
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "receiver_not_authorized"
 
 
 def test_ui_state_lists_tasks_and_reports_logged_out_session(monkeypatch):
@@ -671,11 +702,13 @@ def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
     body = response.json()
     assert body["sender"]["sender_oauth_endpoint"] == "https://sender.example/nuts-oauth2"
     assert body["sender"]["authorization_base"] == "auth-123"
-    assert body["sender"]["sender_bgz_base"] == "https://mach2.disyepd.com/notifiedpull/fhir"
+    assert body["sender"]["sender_bgz_base"] == "https://sender.example/notifiedpull/fhir"
     assert body["sender_access_token"]["received"] is True
     assert body["sender_access_token"]["attestation_source"] == "credentials"
     assert body["sender_access_token"]["selected_introspection"]["introspection_raw"]["employee_identifier"] == "dezi-001"
-    assert body["pulls"]["workflow_task"]["body"]["path"] == "Task/wf-123"
+    assert body["sender"]["workflow_task_identifier_system"] == "urn:ietf:rfc:3986"
+    assert body["sender"]["workflow_task_identifier_value"] == "urn:uuid:11111111-1111-1111-1111-111111111111"
+    assert body["pulls"]["workflow_task"]["body"]["path"] == "Task?identifier=urn%3Aietf%3Arfc%3A3986%7Curn%3Auuid%3A11111111-1111-1111-1111-111111111111"
     assert body["pulls"]["patient"]["body"]["token"] == "sender-token"
     assert all(call["authorization_base"] == "auth-123" for call in sender_fetch_calls)
     assert sender_access_token_calls == [

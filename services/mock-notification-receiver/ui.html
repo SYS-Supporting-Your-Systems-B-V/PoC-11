@@ -915,8 +915,10 @@
       const meta = document.createElement("dl");
       meta.className = "meta";
       const rows = [
-        ["Workflow Task", task.summary.based_on || "-"],
+        ["Workflow Task Identifier System", task.summary.based_on_identifier_system || "-"],
+        ["Workflow Task Identifier", task.summary.based_on_identifier_value || "-"],
         ["Authorization Base", task.summary.authorization_base || "-"],
+        ["Workflow Task Reference", task.summary.based_on_reference || "-"],
         ["Sender URA", task.summary.sender_ura || "-"],
         ["Owner URA", task.summary.owner_ura || "-"],
         ["Patient BSN", task.summary.patient_bsn || "-"],
