@@ -555,9 +555,17 @@
     const loginButton = document.getElementById("login-button");
     const logoutButton = document.getElementById("logout-button");
     const targetTaskId = new URLSearchParams(window.location.search).get("task_id");
+    const appBaseUrl = new URL(window.location.href);
+    if (!appBaseUrl.pathname.endsWith("/")) {
+      appBaseUrl.pathname = `${appBaseUrl.pathname}/`;
+    }
 
     let currentState = null;
     const taskPullResults = {};
+
+    function appUrl(path) {
+      return new URL(path, appBaseUrl).toString();
+    }
 
     function prettyJson(value) {
       return JSON.stringify(value, null, 2);
@@ -883,8 +891,8 @@
 
     function loginHref(taskId) {
       return taskId
-        ? `auth/dezi/login?task_id=${encodeURIComponent(taskId)}`
-        : "auth/dezi/login";
+        ? appUrl(`auth/dezi/login?task_id=${encodeURIComponent(taskId)}`)
+        : appUrl("auth/dezi/login");
     }
 
     function updateLoginButtons() {
@@ -965,7 +973,7 @@
         pullButton.disabled = true;
         showTaskResult("Pull in progress...");
         try {
-          const response = await fetch(`ui/tasks/${encodeURIComponent(task.summary.id)}/pull`, {
+          const response = await fetch(appUrl(`ui/tasks/${encodeURIComponent(task.summary.id)}/pull`), {
             method: "POST",
             headers: {
               "Accept": "application/json"
@@ -1022,7 +1030,7 @@
     async function loadState() {
       refreshButton.disabled = true;
       try {
-        const response = await fetch("ui/state", { headers: { "Accept": "application/json" } });
+        const response = await fetch(appUrl("ui/state"), { headers: { "Accept": "application/json" } });
         currentState = await response.json();
         renderStatus(currentState);
         renderIdentity(currentState);
@@ -1042,10 +1050,12 @@
     logoutButton.addEventListener("click", async () => {
       logoutButton.disabled = true;
       try {
-        await fetch("auth/dezi/logout", {
-          method: "POST",
-          headers: { "Accept": "application/json" }
-        });
+        await fetch(appUrl("auth/dezi/logout"), {
+            method: "POST",
+            headers: {
+              "Accept": "application/json"
+            }
+          });
         await loadState();
       } catch (error) {
         console.error(error);

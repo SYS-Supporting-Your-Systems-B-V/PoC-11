@@ -1,6 +1,6 @@
-# PoC-9-SYS
+# PoC 11 - 13 SYS
 
-This repository contains the integrated PoC-9 setup for mCSD-based workflows in
+This repository contains the integrated PoC 11 - 13 setup for mCSD-based workflows in
 the "Generieke Functies, lokalisatie en addressering" context, covering ITI-90,
 ITI-91, and ITI-130.
 
@@ -19,7 +19,7 @@ Prerequisites:
 1. Review local config files.
 
 The repository already contains working PoC defaults in
-`poc9-start-stack/.env`, `poc9-start-stack/iti-91.conf`, and
+`start-stack/.env`, `start-stack/iti-91.conf`, and
 `services/iti-90/.env.Docker`. If you want to reset them to the shipped
 templates, copy the example files below.
 
@@ -40,7 +40,7 @@ Copy-Item start-stack/.env.example start-stack/.env
 2. Start the full stack.
 
 ```bash
-cd poc9-start-stack
+cd start-stack
 docker compose up -d
 ```
 

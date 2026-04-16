@@ -1,15 +1,15 @@
 {$PUBLIC_DOMAIN} {
 
-#  handle /.well-known/oauth-authorization-server/nuts-oauth2/* {
-#    uri replace /.well-known/oauth-authorization-server/nuts-oauth2 /.well-known/oauth-authorization-server
-#    reverse_proxy nuts-node:8084
-#  }
+  handle /.well-known/oauth-authorization-server/nuts-oauth2/* {
+    uri replace /.well-known/oauth-authorization-server/nuts-oauth2 /.well-known/oauth-authorization-server
+    reverse_proxy nuts-node:8084
+  }
 
   handle_path /nuts-oauth2/* {
     reverse_proxy nuts-node:8084
   }
 
-  handle_path /receiver-mock/* {
+  handle_path /receiver-mock* {
     # Barebones receiver-side notification endpoint used for local sender self-tests.
     reverse_proxy mock-notification-receiver:8002
   }

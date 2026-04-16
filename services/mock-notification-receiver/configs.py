@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     outbound_ca_certs_file: Optional[str] = Field(None, validation_alias="MOCK_RECEIVER_OUTBOUND_CA_CERTS_FILE")
     directory_fhir_base: str = Field(
         "http://hapi-update-client:8081/fhir",
-        validation_alias="MOCK_RECEIVER_DIRECTORY_FHIR_BASE",
+        validation_alias="MOCK_RECEIVER_LOCAL_ADRESBOOK_FHIR_BASE",
     )
     receiver_organization_ura: str = Field("87654321", validation_alias="MOCK_RECEIVER_ORGANIZATION_URA")
     receiver_nuts_subject_id: Optional[str] = Field(None, validation_alias="MOCK_RECEIVER_NUTS_SUBJECT_ID")
@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     sender_token_timeout: float = Field(10.0, validation_alias="MOCK_RECEIVER_SENDER_TOKEN_TIMEOUT")
     session_cookie_name: str = Field("mock_receiver_session", validation_alias="MOCK_RECEIVER_SESSION_COOKIE_NAME")
     session_cookie_secure: bool = Field(True, validation_alias="MOCK_RECEIVER_SESSION_COOKIE_SECURE")
+    portal_basic_auth_username: Optional[str] = Field(
+        None,
+        validation_alias="MOCK_RECEIVER_PORTAL_BASIC_AUTH_USERNAME",
+    )
+    portal_basic_auth_password: Optional[str] = Field(
+        None,
+        validation_alias="MOCK_RECEIVER_PORTAL_BASIC_AUTH_PASSWORD",
+    )
+    portal_basic_auth_realm: str = Field(
+        "Mock Receiver Portal",
+        validation_alias="MOCK_RECEIVER_PORTAL_BASIC_AUTH_REALM",
+    )
     dezi_well_known_url: str = Field(
         "https://acceptatie.auth.dezi.nl/.well-known/openid-configuration",
         validation_alias="MOCK_RECEIVER_DEZI_WELL_KNOWN_URL",

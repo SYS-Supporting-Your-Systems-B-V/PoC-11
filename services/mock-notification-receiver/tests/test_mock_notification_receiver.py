@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import importlib.util
 from urllib.parse import parse_qs, urlparse
 import sys
@@ -87,6 +88,11 @@ def _task_payload(sender_ura: str = "12345678") -> dict:
             }
         ],
     }
+
+
+def _basic_auth_headers(username: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
 
 
 def test_metadata_advertises_task_create(monkeypatch):
@@ -287,6 +293,60 @@ def test_portal_includes_dezi_login_link(monkeypatch):
     assert 'href="auth/dezi/login"' in response.text
     assert 'fetch("ui/state"' in response.text
     assert "Proeftuin Test Identities" not in response.text
+
+
+def test_portal_requires_basic_auth_when_configured(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+    monkeypatch.setattr(appmod.settings, "portal_basic_auth_username", "operator", raising=False)
+    monkeypatch.setattr(appmod.settings, "portal_basic_auth_password", "secret", raising=False)
+    monkeypatch.setattr(appmod.settings, "portal_basic_auth_realm", "Receiver Portal", raising=False)
+
+    with TestClient(appmod.app) as client:
+        unauthorized = client.get("/")
+        authorized = client.get("/", headers=_basic_auth_headers("operator", "secret"))
+
+    assert unauthorized.status_code == 401
+    assert unauthorized.headers["WWW-Authenticate"] == 'Basic realm="Receiver Portal"'
+    assert unauthorized.json()["detail"]["reason"] == "portal_auth_required"
+    assert authorized.status_code == 200
+    assert "DEZI Session" in authorized.text
+
+
+def test_portal_basic_auth_does_not_block_notification_ingest(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+    monkeypatch.setattr(appmod.settings, "portal_basic_auth_username", "operator", raising=False)
+    monkeypatch.setattr(appmod.settings, "portal_basic_auth_password", "secret", raising=False)
+
+    async def _fake_introspect(_token: str):
+        return appmod.TokenContext(
+            raw={},
+            active=True,
+            organization_ura="12345678",
+            scopes=["eOverdracht-receiver"],
+        )
+
+    monkeypatch.setattr(appmod, "_introspect_token", _fake_introspect)
+
+    with TestClient(appmod.app) as client:
+        create = client.post(
+            "/fhir/Task",
+            json=_task_payload(),
+            headers={"Authorization": "Bearer test-token"},
+        )
+        unauthorized_state = client.get("/ui/state")
+        authorized_state = client.get("/ui/state", headers=_basic_auth_headers("operator", "secret"))
+        unauthorized_task_list = client.get("/fhir/Task")
+        authorized_task_list = client.get("/fhir/Task", headers=_basic_auth_headers("operator", "secret"))
+
+    assert create.status_code == 201, create.text
+    assert unauthorized_state.status_code == 401
+    assert authorized_state.status_code == 200
+    assert len(authorized_state.json()["tasks"]) == 1
+    assert unauthorized_task_list.status_code == 401
+    assert authorized_task_list.status_code == 200
+    assert authorized_task_list.json()["total"] == 1
 
 
 def test_ui_state_includes_dezi_claims_and_tokens_when_logged_in(monkeypatch):

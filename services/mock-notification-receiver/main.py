@@ -113,6 +113,69 @@ def _raise_http(http_status_code: int, reason: str, message: str, **extra: Any) 
     raise HTTPException(status_code=http_status_code, detail=detail)
 
 
+def _portal_basic_auth_credentials() -> tuple[str, str]:
+    username = str(settings.portal_basic_auth_username or "").strip()
+    password = str(settings.portal_basic_auth_password or "")
+    return username, password
+
+
+def _portal_basic_auth_realm() -> str:
+    return str(settings.portal_basic_auth_realm or "").strip() or "Mock Receiver Portal"
+
+
+def _portal_basic_auth_exception(reason: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=401,
+        detail={"reason": reason, "message": message},
+        headers={"WWW-Authenticate": f'Basic realm="{_portal_basic_auth_realm()}"'},
+    )
+
+
+def _require_portal_basic_auth(request: Request) -> None:
+    expected_username, expected_password = _portal_basic_auth_credentials()
+    if not expected_username and not expected_password:
+        return
+    if not expected_username or not expected_password:
+        _raise_http(500, "portal_auth_misconfigured", "Portal-auth is onvolledig geconfigureerd.")
+
+    auth_header = str(request.headers.get("Authorization") or "").strip()
+    if not auth_header.lower().startswith("basic "):
+        raise _portal_basic_auth_exception(
+            "portal_auth_required",
+            "Receiver portal authenticatie is vereist.",
+        )
+
+    encoded = auth_header.split(" ", 1)[1].strip()
+    if not encoded:
+        raise _portal_basic_auth_exception(
+            "portal_auth_required",
+            "Receiver portal authenticatie is vereist.",
+        )
+
+    try:
+        decoded = base64.b64decode(encoded).decode("utf-8")
+    except Exception:
+        raise _portal_basic_auth_exception(
+            "portal_auth_invalid",
+            "Receiver portal authenticatie is ongeldig.",
+        )
+
+    provided_username, sep, provided_password = decoded.partition(":")
+    if not sep:
+        raise _portal_basic_auth_exception(
+            "portal_auth_invalid",
+            "Receiver portal authenticatie is ongeldig.",
+        )
+
+    username_ok = secrets.compare_digest(provided_username, expected_username)
+    password_ok = secrets.compare_digest(provided_password, expected_password)
+    if not username_ok or not password_ok:
+        raise _portal_basic_auth_exception(
+            "portal_auth_invalid",
+            "Receiver portal authenticatie is ongeldig.",
+        )
+
+
 def _join_url(base: str, path: str) -> str:
     return f"{str(base or '').strip().rstrip('/')}/{str(path or '').lstrip('/')}"
 
@@ -1604,7 +1667,8 @@ app.state.session_store = SessionStore()
 
 
 @app.get("/")
-async def portal() -> Response:
+async def portal(request: Request) -> Response:
+    _require_portal_basic_auth(request)
     return HTMLResponse(content=str(getattr(app.state, "ui_html", "") or _ui_html()))
 
 
@@ -1624,11 +1688,13 @@ async def health() -> dict[str, Any]:
 
 @app.get("/ui/state")
 async def ui_state(request: Request) -> dict[str, Any]:
+    _require_portal_basic_auth(request)
     return _portal_state(request)
 
 
 @app.get("/auth/dezi/login")
 async def dezi_login(request: Request, task_id: str | None = None) -> Response:
+    _require_portal_basic_auth(request)
     oidc_config = await _get_dezi_oidc_configuration()
     session, _created = _load_session(request, create=True)
     assert session is not None
@@ -1686,6 +1752,7 @@ async def dezi_callback(request: Request, code: str | None = None, state: str | 
 
 @app.post("/auth/dezi/logout")
 async def dezi_logout(request: Request) -> Response:
+    _require_portal_basic_auth(request)
     session_id = str(request.cookies.get(settings.session_cookie_name) or "").strip()
     app.state.session_store.delete(session_id)
     response = JSONResponse({"ok": True})
@@ -1699,7 +1766,8 @@ async def metadata() -> Response:
 
 
 @app.get("/fhir/Task")
-async def list_tasks() -> Response:
+async def list_tasks(request: Request) -> Response:
+    _require_portal_basic_auth(request)
     entries = []
     for stored in app.state.task_store.list():
         entries.append({"resource": stored.resource})
@@ -1743,7 +1811,8 @@ async def create_task(payload: dict[str, Any], request: Request) -> Response:
 
 
 @app.get("/fhir/Task/{task_id}")
-async def read_task(task_id: str) -> Response:
+async def read_task(task_id: str, request: Request) -> Response:
+    _require_portal_basic_auth(request)
     stored = app.state.task_store.get(task_id)
     if stored is None:
         raise HTTPException(status_code=404, detail="Task niet gevonden.")
@@ -1751,7 +1820,8 @@ async def read_task(task_id: str) -> Response:
 
 
 @app.get("/debug/tasks")
-async def debug_tasks() -> dict[str, Any]:
+async def debug_tasks(request: Request) -> dict[str, Any]:
+    _require_portal_basic_auth(request)
     tasks = app.state.task_store.list()
     return {
         "total": len(tasks),
@@ -1767,7 +1837,8 @@ async def debug_tasks() -> dict[str, Any]:
 
 
 @app.get("/debug/tasks/latest")
-async def debug_latest_task() -> dict[str, Any]:
+async def debug_latest_task(request: Request) -> dict[str, Any]:
+    _require_portal_basic_auth(request)
     stored = app.state.task_store.latest()
     if stored is None:
         raise HTTPException(status_code=404, detail="Nog geen Task ontvangen.")
@@ -1779,7 +1850,8 @@ async def debug_latest_task() -> dict[str, Any]:
 
 
 @app.get("/debug/tasks/latest-summary")
-async def debug_latest_summary() -> dict[str, Any]:
+async def debug_latest_summary(request: Request) -> dict[str, Any]:
+    _require_portal_basic_auth(request)
     stored = app.state.task_store.latest()
     if stored is None:
         raise HTTPException(status_code=404, detail="Nog geen Task ontvangen.")
@@ -1787,13 +1859,15 @@ async def debug_latest_summary() -> dict[str, Any]:
 
 
 @app.delete("/debug/tasks")
-async def reset_tasks() -> dict[str, Any]:
+async def reset_tasks(request: Request) -> dict[str, Any]:
+    _require_portal_basic_auth(request)
     deleted = app.state.task_store.clear()
     return {"ok": True, "deleted": deleted}
 
 
 @app.post("/ui/tasks/{task_id}/pull")
 async def ui_pull_task(task_id: str, request: Request) -> dict[str, Any]:
+    _require_portal_basic_auth(request)
     session, _created = _load_session(request, create=False)
     if session is None or not str(session.dezi_id_token or "").strip():
         _raise_http(401, "dezi_login_required", "Log eerst in via DEZI voordat je sender data kunt ophalen.")

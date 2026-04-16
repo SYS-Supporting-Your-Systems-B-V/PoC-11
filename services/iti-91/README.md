@@ -1,6 +1,6 @@
 # ITI-91 mCSD Update Client
 
-This service implements mCSD ITI-91 update behavior for PoC-9 and synchronizes
+This service implements mCSD ITI-91 update behavior for PoC 11 - 13 and synchronizes
 mCSD resources from one or more source directories into the configured update
 client FHIR server.
 
