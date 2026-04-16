@@ -61,7 +61,8 @@ Current notification authorization behavior:
 Current DEZI + protected pull behavior:
 
 - the portal starts an OIDC Authorization Code + PKCE login against DEZI
-- the token exchange uses `private_key_jwt` with the configured certificate/key pair in `certificates/`
+- the token exchange uses `private_key_jwt` with the configured certificate/key pair
+- in the Docker stack these files are expected under `secrets/mock-notification-receiver/dezi/`
 - the userinfo response is decrypted and validated locally
 - the resulting DEZI id-token is included in the local Nuts `request-service-access-token` call
 - the sender `Nuts-OAuth` endpoint is resolved from the Query Directory using the sender URA from the incoming notification task
@@ -80,3 +81,10 @@ Important configuration:
 - `MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE`
 - `MOCK_RECEIVER_DEZI_VERIFY_TLS`
 - `MOCK_RECEIVER_OUTBOUND_VERIFY_TLS`
+
+For the shared stack layout, set:
+
+```bash
+MOCK_RECEIVER_DEZI_CERTIFICATE_FILE=/secrets/mock-notification-receiver/dezi/certificaat_SYS_DEZI.crt
+MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE=/secrets/mock-notification-receiver/dezi/sleutel_SYS_DEZI.key
+```

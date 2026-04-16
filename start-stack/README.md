@@ -10,6 +10,7 @@ optional Caddy reverse proxy.
 - free host ports: `443` (only when using profile `caddy`), `5432`, `8000`,
   `8080`, `8081`, `8082`, `8509`, `16379`
 - `../secrets/cloudflare_api_token` only when using profile `caddy`
+- `../secrets/` is the central location for runtime certificates and keys used by the stack
 
 ## First-time setup
 
@@ -29,6 +30,7 @@ Before you start, review at least:
 - `iti-91.conf` for the ITI-91 update-client settings
 - `.env` for optional Compose profiles such as `caddy`
 - `../services/iti-90/.env.Docker` for ITI-90 upstream and sender settings
+- `../SECRETS.md` for the `secrets/<service>/...` layout and test cert generation
 
 ## Start
 
@@ -124,6 +126,10 @@ Use this table to identify what must be configured for your own setup.
 | `.env:COMPOSE_PROFILES` | `docker compose` | No | Optional profile toggles such as `caddy` |
 | `../services/iti-90/.env.Docker` | `iti-90-address-book-proxy` | Yes | ITI-90 runtime settings loaded via `env_file` |
 | `../services/iti-90/.env.Docker:MCSD_BASE` | `iti-90-address-book-proxy` | Yes | Upstream mCSD/FHIR base URL for ITI-90 |
+| `../secrets/iti-90/mtls/*` | `iti-90-address-book-proxy` | Alleen voor upstream mTLS | Test UZI clientcertificaat + key voor externe FHIR-server |
+| `../secrets/shared/nuts-development-network-ca/stable/ca.pem` | `iti-90-address-book-proxy` | Alleen voor upstream mTLS/TLS met Nuts stable CA | Trust anchor voor de externe FHIR-server |
+| `../secrets/mock-notification-receiver/dezi/*` | `mock-notification-receiver` | Ja voor DEZI login | Certificaat + private key voor `private_key_jwt` naar DEZI |
+| `../secrets/nuts-node/tls/*` | `nuts-node` | Ja voor lokale Nuts TLS | TLS-certificaten die gemount worden naar `/opt/nuts/certs` |
 | `../services/iti-90/.env.Docker:MCSD_SENDER_*` | `iti-90-address-book-proxy` | Required for BgZ notify flow | Sender identity used in PoC notification flows |
 | `client.application.yaml` | `hapi-update-client` | Yes | HAPI config for update-client-side FHIR server |
 | `directory.application.yaml` | `hapi-directory` | Yes | HAPI config for source directory FHIR server |
@@ -176,6 +182,13 @@ docker compose --profile caddy up -d
 
 The Caddy profile requires `../secrets/cloudflare_api_token` and exposes
 `mach2.disyepd.com` on port `443`.
+
+When you need a local test-UZI clientcert for ITI-90 mTLS, generate it from the
+repo root with:
+
+```bash
+./scripts/setup-test-uzi-mtls.sh
+```
 
 Without Caddy, use the direct HAPI endpoints such as
 `http://localhost:8080/fhir`.

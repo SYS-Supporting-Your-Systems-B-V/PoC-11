@@ -64,11 +64,11 @@ class Settings(BaseSettings):
         validation_alias="MOCK_RECEIVER_DEZI_CLIENT_ASSERTION_AUDIENCE",
     )
     dezi_certificate_file: str = Field(
-        "certificates/certificaat_SYS_DEZI.crt",
+        "../../secrets/mock-notification-receiver/dezi/certificaat_SYS_DEZI.crt",
         validation_alias="MOCK_RECEIVER_DEZI_CERTIFICATE_FILE",
     )
     dezi_private_key_file: str = Field(
-        "certificates/sleutel_SYS_DEZI.key",
+        "../../secrets/mock-notification-receiver/dezi/sleutel_SYS_DEZI.key",
         validation_alias="MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE",
     )
     log_level: str = Field("INFO", validation_alias="MOCK_RECEIVER_LOG_LEVEL")

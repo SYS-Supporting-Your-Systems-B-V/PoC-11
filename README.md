@@ -161,11 +161,15 @@ Before starting the stack, verify:
 2. `poc9-start-stack/.env`
 3. `services/iti-90/.env.Docker`
 4. `secrets/cloudflare_api_token` (only when profile `caddy` is enabled)
+5. `SECRETS.md` for the central runtime secret layout (`secrets/<service>/...`)
 
 Template files to copy when needed:
 
 - `poc9-start-stack/iti-91.conf.example` -> `poc9-start-stack/iti-91.conf`
 - `poc9-start-stack/.env.example` -> `poc9-start-stack/.env`
+
+For the shared runtime secret layout and test certificate generation, see
+[`SECRETS.md`](SECRETS.md).
 
 ## Disclaimer
 

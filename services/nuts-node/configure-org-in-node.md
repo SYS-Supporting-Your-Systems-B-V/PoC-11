@@ -55,7 +55,7 @@ curl --location 'http://localhost:8083/internal/vdr/v2/subject'
 
 ## Create the VC from certificate and nuts-node DID
 ```bash
-CERTS_DIR="$(pwd)/services/nuts-node/certs"
+CERTS_DIR="$(pwd)/secrets/nuts-node/tls"
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${CERTS_DIR}:/certs" \
   nutsfoundation/go-didx509-toolkit:1.1.0 \

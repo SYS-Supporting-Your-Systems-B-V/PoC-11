@@ -1,6 +1,6 @@
 # Fake UZI Cert And VC
 
-This repo already contains the generated certificate files in this folder:
+The generated Nuts TLS files now live under `secrets/nuts-node/tls`:
 
 - `mach2.disyepd.com.pem`
 - `mach2.disyepd.com-chain.pem`
@@ -15,7 +15,7 @@ The DID currently used by the local/server stack is:
 Run this from the repo root:
 
 ```powershell
-$certs = (Resolve-Path 'services/nuts-node/certs').Path
+$certs = (Resolve-Path 'secrets/nuts-node/tls').Path
 docker run --rm `
   -v "${certs}:/certs" `
   nutsfoundation/go-didx509-toolkit:1.1.0 `
@@ -31,7 +31,7 @@ docker run --rm `
 Run this from the repo root:
 
 ```bash
-CERTS_DIR="$(pwd -W)/services/nuts-node/certs"
+CERTS_DIR="$(pwd -W)/secrets/nuts-node/tls"
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${CERTS_DIR}:/certs" \
   nutsfoundation/go-didx509-toolkit:1.1.0 \
@@ -53,11 +53,12 @@ Use:
 
 ## Optional: Generate New Fake Cert Files
 
-If you need to re-issue the fake certs instead of reusing the files already in this folder:
+If you need to re-issue the fake certs instead of reusing the files in `secrets/nuts-node/tls`:
 
 ```PowerShell
 docker run --rm `
-  -v "C:\Users\Yob\Documents\Coding\PoC 9\PoC-9-SYS\services\nuts-node\certs:/work" `
+  -v "C:\Users\Yob\Documents\Coding\PoC 9\PoC-9-SYS\secrets\nuts-node\tls:/work" `
+  -v "C:\Users\Yob\Documents\Coding\PoC 9\PoC-9-SYS\services\nuts-node\certs:/scripts:ro" `
   alpine:3.19 `
-  sh /work/generate-certs.sh
+  sh /scripts/generate-certs.sh
 ```

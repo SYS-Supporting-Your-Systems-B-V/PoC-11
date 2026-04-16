@@ -414,6 +414,50 @@ def test_build_httpx_verify_adds_custom_ca_to_system_store(appmod, monkeypatch, 
     assert ctx.loaded_cafile == str(ca_file)
 
 
+def test_build_httpx_verify_loads_mtls_cert_chain(appmod, monkeypatch, tmp_path):
+    cert_file = tmp_path / "client.pem"
+    key_file = tmp_path / "client.key"
+    cert_file.write_text("dummy-cert", encoding="utf-8")
+    key_file.write_text("dummy-key", encoding="utf-8")
+
+    class DummyContext:
+        def __init__(self):
+            self.loaded_cafile = None
+            self.loaded_cert_chain = None
+
+        def load_verify_locations(self, *, cafile: str):
+            self.loaded_cafile = cafile
+
+        def load_cert_chain(self, *, certfile: str, keyfile: str | None = None):
+            self.loaded_cert_chain = (certfile, keyfile)
+
+    ctx = DummyContext()
+
+    monkeypatch.setattr(appmod.settings, "verify_tls", True, raising=False)
+    monkeypatch.setattr(appmod.settings, "ca_certs_file", None, raising=False)
+    monkeypatch.setattr(appmod.settings, "mtls_cert_file", str(cert_file), raising=False)
+    monkeypatch.setattr(appmod.settings, "mtls_key_file", str(key_file), raising=False)
+    monkeypatch.setattr(appmod.ssl, "create_default_context", lambda: ctx)
+
+    verify = appmod._build_httpx_verify()
+
+    assert verify is ctx
+    assert ctx.loaded_cafile is None
+    assert ctx.loaded_cert_chain == (str(cert_file), str(key_file))
+
+
+def test_build_httpx_verify_rejects_mtls_key_without_cert(appmod, monkeypatch, tmp_path):
+    key_file = tmp_path / "client.key"
+    key_file.write_text("dummy-key", encoding="utf-8")
+
+    monkeypatch.setattr(appmod.settings, "verify_tls", True, raising=False)
+    monkeypatch.setattr(appmod.settings, "mtls_cert_file", None, raising=False)
+    monkeypatch.setattr(appmod.settings, "mtls_key_file", str(key_file), raising=False)
+
+    with pytest.raises(RuntimeError, match="MCSD_MTLS_KEY_FILE vereist ook MCSD_MTLS_CERT_FILE"):
+        appmod._build_httpx_verify()
+
+
 def test_bgz_preflight_location_routing_and_metadata_probe_ok(appmod, client, monkeypatch):
     async def _fake_capability_mapping(*, target: str, organization: str | None, include_oauth: bool, limit: int):
         return _capability_mapping_stub(target=target)

@@ -59,6 +59,8 @@ een andere hostnaam die in `.env.Docker` is toegestaan; anders krijg je
 | `MCSD_BEARER_TOKEN` | optioneel | optioneel | Upstream authenticatie |
 | `MCSD_VERIFY_TLS` | optioneel | optioneel | TLS verificatie |
 | `MCSD_CA_CERTS_FILE` | optioneel | optioneel | Custom CA bundle |
+| `MCSD_MTLS_CERT_FILE` | optioneel | optioneel | Clientcertificaat voor upstream mTLS |
+| `MCSD_MTLS_KEY_FILE` | optioneel | optioneel | Private key voor upstream mTLS |
 | `MCSD_MAX_QUERY_PARAMS` | optioneel | — | Limieten voor `/mcsd/search/{resource}` |
 | `MCSD_MAX_QUERY_VALUE_LENGTH` | optioneel | — | Limieten voor `/mcsd/search/{resource}` |
 | `MCSD_MAX_QUERY_PARAM_VALUES` | optioneel | — | Limieten voor `/mcsd/search/{resource}` |
@@ -174,10 +176,21 @@ Bij gebruik van `https://`, kan je TLS verificatie instellen met:
 
 ```bash
 export MCSD_VERIFY_TLS=true        # of false (niet aanbevolen)
-export MCSD_CA_CERTS_FILE=/path/to/ca-bundle.pem   # optioneel
+export MCSD_CA_CERTS_FILE=/secrets/shared/nuts-development-network-ca/stable/ca.pem
+export MCSD_MTLS_CERT_FILE=/secrets/iti-90/mtls/test-uzi-client-chain.pem
+export MCSD_MTLS_KEY_FILE=/secrets/iti-90/mtls/test-uzi-client.key
 ```
 
 `MCSD_CA_CERTS_FILE` wordt alleen gebruikt als `MCSD_VERIFY_TLS=true`.
+Als `MCSD_MTLS_KEY_FILE` leeg is, moet `MCSD_MTLS_CERT_FILE` ook de private key bevatten.
+Voor de Nuts development network CA gebruik je `stable/ca.pem` als trust anchor; dat repo bevat geen kant-en-klaar clientcertificaat.
+In de Docker stack mount `start-stack/docker-compose.yaml` de repo-root `secrets/` map op `/secrets` voor ITI-90.
+
+Een lokale test-UZI clientcert-set kan je genereren met:
+
+```bash
+./scripts/setup-test-uzi-mtls.sh
+```
 
 #### CORS en allowed hosts
 
@@ -1281,7 +1294,7 @@ const MCS_LIMIT = 50;                         // max resultaten per zoekopdracht
 | `MCSD_ALLOWED_HOSTS` | **Ja** | Moet de proxy-hostnaam bevatten |
 | `MCSD_UPSTREAM_TIMEOUT` | **Ja** | Beïnvloedt de responstijd |
 | `MCSD_BEARER_TOKEN` | **Ja** | Upstream authenticatie (transparant voor de HTML-client) |
-| `MCSD_VERIFY_TLS` / `MCSD_CA_CERTS_FILE` | **Ja** | Upstream TLS (transparant voor de HTML-client) |
+| `MCSD_VERIFY_TLS` / `MCSD_CA_CERTS_FILE` / `MCSD_MTLS_CERT_FILE` / `MCSD_MTLS_KEY_FILE` | **Ja** | Upstream TLS en eventueel mTLS (transparant voor de HTML-client) |
 | `MCSD_IS_PRODUCTION` | **Ja** | Productie guardrails (CORS/hosts/TLS moeten dan dicht) |
 | `MCSD_LOG_LEVEL` | **Ja** | Voor troubleshooting |
 | `MCSD_HTTPX_MAX_CONNECTIONS` | **Ja** | HTTP client pool sizing |

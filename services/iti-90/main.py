@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     bearer_token: Optional[str] = Field(None, validation_alias="MCSD_BEARER_TOKEN")
     verify_tls: bool = Field(True, validation_alias="MCSD_VERIFY_TLS")
     ca_certs_file: Optional[str] = Field(None, validation_alias="MCSD_CA_CERTS_FILE")
+    mtls_cert_file: Optional[str] = Field(None, validation_alias="MCSD_MTLS_CERT_FILE")
+    mtls_key_file: Optional[str] = Field(None, validation_alias="MCSD_MTLS_KEY_FILE")
     allow_origins: Annotated[List[str], NoDecode] = Field(["*"], validation_alias="MCSD_ALLOW_ORIGINS")
     allowed_hosts: Annotated[List[str], NoDecode] = Field(["*"], validation_alias="MCSD_ALLOWED_HOSTS")
     api_key: Optional[str] = Field(None, validation_alias="MCSD_API_KEY")
@@ -244,13 +246,16 @@ def _dump_debug_json(label: str, payload: Any) -> None:
 logger.setLevel(settings.log_level.upper())
 
 async def on_startup():
+    global HTTPX_VERIFY
     _setup_file_logging()
+    HTTPX_VERIFY = _build_httpx_verify()
     logger.info("[mCSD] pydantic env_file=%s", str(_ENV_FILE_PATH))
     logger.info(
-        "[mCSD] base=%s timeout=%ss auth=%s",
+        "[mCSD] base=%s timeout=%ss auth=%s mtls=%s",
         settings.base_url,
         settings.upstream_timeout,
         "on" if settings.bearer_token else "off",
+        "on" if (settings.mtls_cert_file or "").strip() else "off",
     )
     if settings.debug_dump_json:
         out_dir = _resolve_debug_dump_dir()
@@ -1229,21 +1234,53 @@ HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=TIMEOUT, write=TIMEOUT, pool=TI
 HTTPX_LIMITS = httpx.Limits(max_connections=settings.httpx_max_connections, max_keepalive_connections=settings.httpx_max_keepalive_connections)
 
 
+def _resolve_mtls_file(raw_path: Optional[str], *, env_name: str) -> Optional[Path]:
+    value = str(raw_path or "").strip()
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_file():
+        raise RuntimeError(f"{env_name} verwijst niet naar een bestaand bestand: {path}")
+    return path
+
+
 def _build_httpx_verify() -> bool | ssl.SSLContext:
+    cert_file = _resolve_mtls_file(settings.mtls_cert_file, env_name="MCSD_MTLS_CERT_FILE")
+    key_file = _resolve_mtls_file(settings.mtls_key_file, env_name="MCSD_MTLS_KEY_FILE")
+    if key_file and not cert_file:
+        raise RuntimeError("MCSD_MTLS_KEY_FILE vereist ook MCSD_MTLS_CERT_FILE.")
+
+    ctx: ssl.SSLContext | None = None
     if not settings.verify_tls:
-        return False
-    if settings.ca_certs_file:
-        ca_file = Path(str(settings.ca_certs_file)).expanduser()
-        if not ca_file.is_file():
-            logger.warning("[mCSD] CA bundle not found file=%s; falling back to system trust store", str(ca_file))
-            return True
+        if not cert_file:
+            return False
         ctx = ssl.create_default_context()
-        ctx.load_verify_locations(cafile=str(ca_file))
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    else:
+        if settings.ca_certs_file or cert_file:
+            ctx = ssl.create_default_context()
+        if settings.ca_certs_file:
+            ca_file = Path(str(settings.ca_certs_file)).expanduser()
+            if not ca_file.is_file():
+                logger.warning("[mCSD] CA bundle not found file=%s; falling back to system trust store", str(ca_file))
+            else:
+                if ctx is None:
+                    ctx = ssl.create_default_context()
+                ctx.load_verify_locations(cafile=str(ca_file))
+    if cert_file:
+        try:
+            if ctx is None:
+                ctx = ssl.create_default_context()
+            ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file) if key_file else None)
+        except Exception as exc:
+            raise RuntimeError(f"Kon mTLS clientcertificaat niet laden uit {cert_file}: {exc}") from exc
+    if ctx is not None:
         return ctx
     return True
 
 
-HTTPX_VERIFY = _build_httpx_verify()
+HTTPX_VERIFY: bool | ssl.SSLContext = True
 
 def verify_api_key(
     x_api_key: str | None = Header(
@@ -1463,7 +1500,6 @@ def _raise_502_with_reason(e: Exception):
     info = _classify_upstream_exception(e)
     logger.error("UP  ERR req_id=%s reason=%s type=%s", REQUEST_ID_CTX.get() or "-", info.get("reason"), type(e).__name__)
     raise HTTPException(status_code=502, detail=info)
-
 
 def _truncate_text(text: str, limit: int = 2000) -> str:
     if text is None:

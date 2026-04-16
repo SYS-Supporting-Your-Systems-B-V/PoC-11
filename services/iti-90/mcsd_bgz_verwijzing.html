@@ -1758,8 +1758,21 @@
                 if (!ready) {
                     const probe = selectedEndpoint.receiver_probe || {};
                     const reason = probe && probe.reason ? String(probe.reason) : "";
+                    const message = probe && probe.message ? String(probe.message) : "";
+                    let statusText = "Endpoint gevonden, maar preflight niet OK.";
+                    if (reason === "receiver_access_token_request_failed" || reason === "receiver_access_token_invalid_json" || reason === "receiver_access_token_missing") {
+                        statusText = message || "Endpoint gevonden, maar sender krijgt geen receiver access token via Nuts.";
+                    } else if (reason === "tls") {
+                        statusText = "Endpoint gevonden, maar TLS naar de receiver faalt.";
+                    } else if (reason === "http_401" || reason === "http_403") {
+                        statusText = message || "Endpoint gevonden, maar de receiver weigert toegang tot /metadata.";
+                    } else if (message) {
+                        statusText = message;
+                    } else {
+                        statusText = "Endpoint gevonden, maar preflight niet OK (receiver onbereikbaar of endpoint gewijzigd).";
+                    }
                     setStatus(
-                        "Endpoint gevonden, maar preflight niet OK (receiver onbereikbaar of endpoint gewijzigd)." + (reason ? (" (" + reason + ")") : ""),
+                        statusText + (reason ? (" (" + reason + ")") : ""),
                         "warning",
                         true
                     );

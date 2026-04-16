@@ -53,6 +53,7 @@ services:
       - "8000:8000"
     volumes:
       - ../services/iti-90:/app
+      - ../secrets:/secrets:ro
       - caddy_data:/caddy-data:ro
     depends_on:
       hapi-directory-health:
@@ -96,11 +97,14 @@ services:
       - "8002:8002"
     volumes:
       - ../services/mock-notification-receiver:/app
+      - ../secrets:/secrets:ro
     environment:
       MOCK_RECEIVER_PUBLIC_ROOT: ${MOCK_RECEIVER_PUBLIC_ROOT:-https://mach2.disyepd.com/receiver-mock}
       MOCK_RECEIVER_PUBLIC_BASE: ${MOCK_RECEIVER_PUBLIC_BASE:-https://mach2.disyepd.com/receiver-mock/fhir}
       MOCK_RECEIVER_LOCAL_ADRESBOOK_FHIR_BASE: ${MOCK_RECEIVER_LOCAL_ADRESBOOK_FHIR_BASE:-http://hapi-update-client:8081/fhir}
       MOCK_RECEIVER_DEZI_CALLBACK_PATH: ${MOCK_RECEIVER_DEZI_CALLBACK_PATH:-auth/dezi/callback}
+      MOCK_RECEIVER_DEZI_CERTIFICATE_FILE: ${MOCK_RECEIVER_DEZI_CERTIFICATE_FILE:-/secrets/mock-notification-receiver/dezi/certificaat_SYS_DEZI.crt}
+      MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE: ${MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE:-/secrets/mock-notification-receiver/dezi/sleutel_SYS_DEZI.key}
       MOCK_RECEIVER_SENDER_DATA_SCOPE: ${MOCK_RECEIVER_SENDER_DATA_SCOPE:-eOverdracht-sender}
     networks:
       - mcsd_update_client_net
@@ -117,7 +121,7 @@ services:
       - "8083:8083"
       - "8084:8084"
     volumes:
-      - ../services/nuts-node/certs:/opt/nuts/certs:ro
+      - ../secrets/nuts-node/tls:/opt/nuts/certs:ro
       - ./caddy:/opt/local-caddy:ro
       - nuts_node_data:/data
     healthcheck:

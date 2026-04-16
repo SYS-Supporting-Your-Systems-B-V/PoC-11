@@ -5,7 +5,7 @@ Use `services/nuts-node/certs/create_fake_UZI_cert.md` as the canonical guide.
 Short version for local Windows use from the repo root:
 
 ```powershell
-$certs = (Resolve-Path 'services/nuts-node/certs').Path
+$certs = (Resolve-Path 'secrets/nuts-node/tls').Path
 docker run --rm `
   -v "${certs}:/certs" `
   nutsfoundation/go-didx509-toolkit:1.1.0 `
@@ -19,7 +19,7 @@ docker run --rm `
 If you use Git Bash instead of PowerShell:
 
 ```bash
-CERTS_DIR="$(pwd -W)/services/nuts-node/certs"
+CERTS_DIR="$(pwd -W)/secrets/nuts-node/tls"
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${CERTS_DIR}:/certs" \
   nutsfoundation/go-didx509-toolkit:1.1.0 \
