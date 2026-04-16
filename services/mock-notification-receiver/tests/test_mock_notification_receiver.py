@@ -90,6 +90,41 @@ def _task_payload(sender_ura: str = "12345678") -> dict:
     }
 
 
+def _workflow_task_payload(*pull_paths: str) -> dict:
+    return {
+        "resourceType": "Task",
+        "id": "wf-1",
+        "status": "requested",
+        "input": [
+            {
+                "type": {
+                    "coding": [
+                        {
+                            "system": "http://fhir.nl/fhir/NamingSystem/TaskParameter",
+                            "code": "authorization-base",
+                        }
+                    ]
+                },
+                "valueString": "auth-123",
+            },
+            *[
+                {
+                    "type": {
+                        "coding": [
+                            {
+                                "system": "http://example.org/fhir/NamingSystem/workflow-input",
+                                "code": f"pull-{index}",
+                            }
+                        ]
+                    },
+                    "valueString": path,
+                }
+                for index, path in enumerate(pull_paths, start=1)
+            ],
+        ],
+    }
+
+
 def _basic_auth_headers(username: str, password: str) -> dict[str, str]:
     token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     return {"Authorization": f"Basic {token}"}
@@ -682,6 +717,11 @@ def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
 
     sender_access_token_calls = []
     sender_fetch_calls = []
+    workflow_task_body = _workflow_task_payload(
+        "Patient?_include=Patient:general-practitioner",
+        "Observation/$lastn?code=http://loinc.org|85354-9",
+        "DocumentReference",
+    )
 
     async def _fake_discover_sender_endpoints(_sender_ura: str):
         return {
@@ -728,12 +768,21 @@ def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
                 "authorization_base": authorization_base,
             }
         )
+        if relative_path.startswith("Task?identifier="):
+            body = {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "total": 1,
+                "entry": [{"resource": workflow_task_body}],
+            }
+        else:
+            body = {"resourceType": "Bundle", "type": "searchset", "path": relative_path, "token": sender_access_token}
         return {
             "ok": True,
             "url": f"{sender_bgz_base.rstrip('/')}/{relative_path}",
             "status_code": 200,
             "content_type": "application/fhir+json",
-            "body": {"resourceType": "Bundle", "type": "searchset", "path": relative_path, "token": sender_access_token},
+            "body": body,
         }
 
     monkeypatch.setattr(appmod, "_discover_sender_endpoints", _fake_discover_sender_endpoints)
@@ -768,9 +817,22 @@ def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
     assert body["sender_access_token"]["selected_introspection"]["introspection_raw"]["employee_identifier"] == "dezi-001"
     assert body["sender"]["workflow_task_identifier_system"] == "urn:ietf:rfc:3986"
     assert body["sender"]["workflow_task_identifier_value"] == "urn:uuid:11111111-1111-1111-1111-111111111111"
-    assert body["pulls"]["workflow_task"]["body"]["path"] == "Task?identifier=urn%3Aietf%3Arfc%3A3986%7Curn%3Auuid%3A11111111-1111-1111-1111-111111111111"
-    assert body["pulls"]["patient"]["body"]["token"] == "sender-token"
+    assert body["pulls"]["workflow_task"]["body"]["resourceType"] == "Bundle"
+    assert body["sender"]["workflow_task_pull_paths"] == [
+        "Patient?_include=Patient:general-practitioner",
+        "Observation/$lastn?code=http://loinc.org|85354-9",
+        "DocumentReference",
+    ]
+    assert body["pulls"]["Patient?_include=Patient:general-practitioner"]["body"]["token"] == "sender-token"
+    assert body["pulls"]["Observation/$lastn?code=http://loinc.org|85354-9"]["body"]["path"] == "Observation/$lastn?code=http%3A%2F%2Floinc.org%7C85354-9"
+    assert body["pulls"]["DocumentReference"]["body"]["path"] == "DocumentReference"
     assert all(call["authorization_base"] == "auth-123" for call in sender_fetch_calls)
+    assert [call["relative_path"] for call in sender_fetch_calls] == [
+        "Task?identifier=urn%3Aietf%3Arfc%3A3986%7Curn%3Auuid%3A11111111-1111-1111-1111-111111111111",
+        "Patient?_include=Patient%3Ageneral-practitioner",
+        "Observation/$lastn?code=http%3A%2F%2Floinc.org%7C85354-9",
+        "DocumentReference",
+    ]
     assert sender_access_token_calls == [
         {
             "task_id": "notif-1",

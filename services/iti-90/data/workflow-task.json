@@ -77,42 +77,6 @@
         "coding": [
           {
             "system": "http://loinc.org",
-            "code": "11450-4",
-            "display": "Problem list - Reported"
-          }
-        ]
-      },
-      "valueString": "Condition"
-    },
-    {
-      "type": {
-        "coding": [
-          {
-            "system": "http://loinc.org",
-            "code": "48765-2",
-            "display": "Allergies and adverse reactions Document"
-          }
-        ]
-      },
-      "valueString": "AllergyIntolerance"
-    },
-    {
-      "type": {
-        "coding": [
-          {
-            "system": "http://snomed.info/sct",
-            "code": "422979000",
-            "display": "Known medication use"
-          }
-        ]
-      },
-      "valueString": "MedicationStatement?category=urn%3Aoid%3A2.16.840.1.113883.2.4.3.11.60.20.77.5.3%7C6&_include=MedicationStatement:medication"
-    },
-    {
-      "type": {
-        "coding": [
-          {
-            "system": "http://loinc.org",
             "code": "85354-9",
             "display": "Blood pressure"
           }
@@ -125,26 +89,12 @@
         "coding": [
           {
             "system": "http://loinc.org",
-            "code": "77599-9",
-            "display": "Additional documentation"
+            "code": "29463-7",
+            "display": "Body weight"
           }
         ]
       },
-      "valueString": "DocumentReference?status=current"
-    },
-    {
-      "type": {
-        "coding": [
-          {
-            "system": "http://fhir.nl/fhir/NamingSystem/TaskParameter",
-            "code": "read-resource"
-          }
-        ]
-      },
-      "valueReference": {
-        "reference": "DocumentReference/docref-verwijsbrief",
-        "display": "Verwijsbrief cardiologie"
-      }
+      "valueString": "Observation/$lastn?code=http://loinc.org|29463-7"
     }
   ]
 }

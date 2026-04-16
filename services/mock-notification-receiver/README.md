@@ -67,6 +67,7 @@ Current DEZI + protected pull behavior:
 - the resulting DEZI id-token is included in the local Nuts `request-service-access-token` call
 - the sender `Nuts-OAuth` endpoint is resolved from the Query Directory using the sender URA from the incoming notification task
 - the workflow task is fetched via `GET /fhir/Task?identifier=...` using `Task.basedOn[0].identifier`
+- subsequent sender pulls are derived from the fetched workflow task `Task.input` entries instead of a hardcoded receiver-side list
 - the sender BgZ base is resolved from the directory first and only falls back to the notification task extension for backward compatibility with older notifications
 
 Important configuration:

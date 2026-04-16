@@ -135,7 +135,7 @@ Technical baseline:
 From repository root:
 
 ```bash
-cd poc9-start-stack
+cd start-stack
 docker compose up -d
 ```
 
@@ -157,8 +157,8 @@ For stack profiles/config/seeding details, see
 
 Before starting the stack, verify:
 
-1. `poc9-start-stack/iti-91.conf`
-2. `poc9-start-stack/.env`
+1. `start-stack/iti-91.conf`
+2. `start-stack/.env`
 3. `services/iti-90/.env.Docker`
 4. `secrets/cloudflare_api_token` (only when profile `caddy` is enabled)
 5. `SECRETS.md` for the central runtime secret layout (`secrets/<service>/...`)

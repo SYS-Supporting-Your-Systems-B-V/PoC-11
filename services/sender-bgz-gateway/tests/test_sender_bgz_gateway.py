@@ -79,7 +79,36 @@ class FakeHttpClient:
         return None
 
 
-def _workflow_task(appmod, *, status: str = "requested") -> Dict[str, Any]:
+def _workflow_input(path: str, *, code: str = "pull-path") -> Dict[str, Any]:
+    return {
+        "type": {
+            "coding": [
+                {
+                    "system": "http://example.org/fhir/NamingSystem/workflow-input",
+                    "code": code,
+                }
+            ]
+        },
+        "valueString": path,
+    }
+
+
+def _workflow_task(
+    appmod,
+    *,
+    status: str = "requested",
+    data_inputs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    if data_inputs is None:
+        data_inputs = [
+            "Patient",
+            "Patient?_include=Patient:general-practitioner",
+            "Observation/$lastn",
+            "Condition",
+            "AllergyIntolerance",
+            "MedicationStatement",
+            "DocumentReference",
+        ]
     return {
         "resourceType": "Task",
         "id": "wf-1",
@@ -117,7 +146,8 @@ def _workflow_task(appmod, *, status: str = "requested") -> Dict[str, Any]:
                     ]
                 },
                 "valueString": "auth-123",
-            }
+            },
+            *[_workflow_input(path, code=f"pull-{index}") for index, path in enumerate(data_inputs, start=1)],
         ],
     }
 
@@ -519,6 +549,29 @@ def test_data_read_forbidden_without_professional_claims(monkeypatch):
 
     assert response.status_code == 403
     assert response.json()["detail"]["reason"] == "missing_employee_identifier"
+
+
+def test_patient_search_forbidden_when_not_declared_on_workflow_task(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue(
+        "GET",
+        "http://upstream/fhir/Task",
+        DummyResponse(200, _bundle(_workflow_task(appmod, data_inputs=["Observation/$lastn?code=http://loinc.org|85354-9"]))),
+    )
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Patient", headers=_auth_headers())
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "workflow_task_input_not_authorized"
 
 
 def test_task_update_forbidden_when_workflow_task_not_active(monkeypatch):

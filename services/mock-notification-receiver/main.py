@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Optional
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import httpx
 import uvicorn
@@ -39,20 +39,12 @@ SESSION_COOKIE_DEFAULT_PATH = "/"
 SESSION_EXPIRY_SECONDS = 8 * 60 * 60
 TASK_EXT_SENDER_BGZ_BASE_URL = "http://example.org/fhir/StructureDefinition/sender-bgz-base"
 SENDER_AUTHORIZATION_BASE_HEADER = "X-Authorization-Base"
+TASK_PARAMETER_SYSTEM = "http://fhir.nl/fhir/NamingSystem/TaskParameter"
 URA_IDENTIFIER_SYSTEM = "http://fhir.nl/fhir/NamingSystem/ura"
 BGZ_SERVER_CAPABILITY_CODE = "http://nictiz.nl/fhir/CapabilityStatement/bgz2017-servercapabilities"
 NUTS_OAUTH_CAPABILITY_CODE = "Nuts-OAuth"
 UI_HTML_PATH = Path(__file__).with_name("ui.html")
 OIDC_CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-SENDER_PULL_PATHS = (
-    ("workflow_task", "workflow_task"),
-    ("patient", "Patient"),
-    ("observations_lastn", "Observation/$lastn"),
-    ("conditions", "Condition"),
-    ("allergies", "AllergyIntolerance"),
-    ("medications", "MedicationStatement"),
-    ("documents", "DocumentReference"),
-)
 
 
 def _now_utc() -> datetime:
@@ -212,6 +204,97 @@ def _split_ref(ref: str) -> tuple[str, str]:
 def _is_json_content_type(content_type: str) -> bool:
     lowered = str(content_type or "").lower()
     return any(marker in lowered for marker in FHIR_JSON_CONTENT_TYPES)
+
+
+def _task_input_codings(item: dict[str, Any]) -> list[dict[str, Any]]:
+    item_type = item.get("type") or {}
+    coding_list = item_type.get("coding") or []
+    return [coding for coding in coding_list if isinstance(coding, dict)]
+
+
+def _task_input_is_parameter(item: dict[str, Any]) -> bool:
+    for coding in _task_input_codings(item):
+        system = str(coding.get("system") or "").strip()
+        code = str(coding.get("code") or "").strip()
+        if system == TASK_PARAMETER_SYSTEM:
+            return True
+        if code in {"authorization-base", "get-workflow-task"}:
+            return True
+    return False
+
+
+def _task_input_pull_value(item: dict[str, Any]) -> str:
+    for key in ("valueString", "valueUri", "valueUrl"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalize_relative_fhir_path(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    path = str(parsed.path or "").strip()
+    if "/fhir/" in path:
+        path = path.rsplit("/fhir/", 1)[1]
+    path = path.lstrip("/")
+    if path.startswith("fhir/"):
+        path = path[5:]
+    return path.rstrip("/")
+
+
+def _display_relative_fhir_path(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    path = _normalize_relative_fhir_path(raw)
+    query = str(parsed.query or "").strip()
+    return f"{path}?{query}" if path and query else path
+
+
+def _canonical_relative_fhir_path(value: str) -> str:
+    path = _normalize_relative_fhir_path(value)
+    if not path:
+        return ""
+    normalized_query = sorted(parse_qsl(urlsplit(str(value or "").strip()).query, keep_blank_values=True))
+    if not normalized_query:
+        return path
+    return f"{path}?{urlencode(normalized_query, doseq=True)}"
+
+
+def _workflow_task_pull_entries(task: dict[str, Any]) -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    entries: list[tuple[str, str]] = []
+    for item in task.get("input") or []:
+        if not isinstance(item, dict) or _task_input_is_parameter(item):
+            continue
+        raw_value = _task_input_pull_value(item)
+        request_path = _canonical_relative_fhir_path(raw_value)
+        if not request_path or request_path in seen:
+            continue
+        seen.add(request_path)
+        entries.append((_display_relative_fhir_path(raw_value) or request_path, request_path))
+    return entries
+
+
+def _extract_workflow_task_resource(body: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(body, dict):
+        return None
+    resource_type = str(body.get("resourceType") or "").strip()
+    if resource_type == "Task":
+        return copy.deepcopy(body)
+    if resource_type != "Bundle":
+        return None
+    for entry in body.get("entry") or []:
+        if not isinstance(entry, dict):
+            continue
+        resource = entry.get("resource")
+        if isinstance(resource, dict) and str(resource.get("resourceType") or "").strip() == "Task":
+            return copy.deepcopy(resource)
+    return None
 
 
 def _verify_arg(verify_tls: bool, ca_certs_file: str | None) -> bool | str:
@@ -1546,34 +1629,57 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
         session=session,
     )
 
-    named_paths: list[tuple[str, str]] = []
     workflow_task_id = ""
     workflow_task_search_path = ""
     if workflow_task_identifier_system and workflow_task_identifier_value:
         workflow_task_search_path = _workflow_task_search_path(workflow_task_identifier_system, workflow_task_identifier_value)
-        named_paths.append(("workflow_task", workflow_task_search_path))
     elif workflow_task_ref:
         _, workflow_task_id = _split_ref(workflow_task_ref)
-        if workflow_task_id:
-            named_paths.append(("workflow_task", f"Task/{workflow_task_id}"))
-    for key, path in SENDER_PULL_PATHS:
-        if key == "workflow_task":
-            continue
-        named_paths.append((key, path))
+    workflow_task_request_path = workflow_task_search_path or (f"Task/{workflow_task_id}" if workflow_task_id else "")
+    if not workflow_task_request_path:
+        _raise_http(
+            400,
+            "workflow_task_reference_missing",
+            "Notification Task bevat geen workflow task referentie of identifier voor de sender pull.",
+        )
 
+    workflow_task_pull = await _fetch_sender_path(
+        sender_bgz_base,
+        sender_access_token,
+        workflow_task_request_path,
+        authorization_base=authorization_base,
+    )
+    workflow_task_resource = _extract_workflow_task_resource(workflow_task_pull.get("body"))
+    if not workflow_task_pull.get("ok"):
+        _raise_http(
+            502,
+            "workflow_task_fetch_failed",
+            "Het ophalen van de workflow task bij de sender is mislukt.",
+            workflow_task_pull=workflow_task_pull,
+        )
+    if workflow_task_resource is None:
+        _raise_http(
+            502,
+            "workflow_task_invalid",
+            "De sender gaf geen geldige workflow task terug voor de geautoriseerde pull.",
+            workflow_task_pull=workflow_task_pull,
+        )
+
+    named_paths = _workflow_task_pull_entries(workflow_task_resource)
     fetched = await asyncio.gather(
         *[
             _fetch_sender_path(
                 sender_bgz_base,
                 sender_access_token,
-                path,
+                request_path,
                 authorization_base=authorization_base,
             )
-            for _, path in named_paths
+            for _, request_path in named_paths
         ],
         return_exceptions=False,
     )
-    pulls = {name: result for (name, _), result in zip(named_paths, fetched)}
+    pulls: dict[str, Any] = {"workflow_task": workflow_task_pull}
+    pulls.update({name: result for (name, _), result in zip(named_paths, fetched)})
 
     return {
         "task_id": str(task.get("id") or "").strip(),
@@ -1590,6 +1696,7 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
             "workflow_task_identifier_value": workflow_task_identifier_value,
             "workflow_task_search_path": workflow_task_search_path or None,
             "workflow_task_id": workflow_task_id or None,
+            "workflow_task_pull_paths": [name for name, _ in named_paths],
         },
         "dezi_identity": copy.deepcopy(session.dezi_identity),
         "sender_access_token": {

@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 import uvicorn
@@ -49,6 +49,7 @@ ALLOWED_DATA_RESOURCES = {
     "Binary",
 }
 AUTHORIZATION_BASE_HEADER = "X-Authorization-Base"
+TASK_PARAMETER_SYSTEM = "http://fhir.nl/fhir/NamingSystem/TaskParameter"
 TERMINAL_TASK_STATUSES = {
     "cancelled",
     "canceled",
@@ -407,7 +408,10 @@ def _task_has_authorization_base(task: dict[str, Any], authorization_base: str) 
         for coding in coding_list:
             if not isinstance(coding, dict):
                 continue
-            if str(coding.get("code") or "") == "authorization-base":
+            if (
+                str(coding.get("system") or "") == TASK_PARAMETER_SYSTEM
+                and str(coding.get("code") or "") == "authorization-base"
+            ):
                 return str(item.get("valueString") or "") == authorization_base
     return False
 
@@ -417,6 +421,116 @@ def _task_is_active(task: dict[str, Any]) -> bool:
     if not status:
         return False
     return status not in TERMINAL_TASK_STATUSES
+
+
+def _task_input_codings(item: dict[str, Any]) -> list[dict[str, Any]]:
+    item_type = item.get("type") or {}
+    coding_list = item_type.get("coding") or []
+    return [coding for coding in coding_list if isinstance(coding, dict)]
+
+
+def _task_input_path_value(item: dict[str, Any]) -> str:
+    for key in ("valueString", "valueUri", "valueUrl"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _task_input_is_parameter(item: dict[str, Any]) -> bool:
+    for coding in _task_input_codings(item):
+        system = str(coding.get("system") or "").strip()
+        code = str(coding.get("code") or "").strip()
+        if system == TASK_PARAMETER_SYSTEM:
+            return True
+        if code in {"authorization-base", "get-workflow-task"}:
+            return True
+    return False
+
+
+def _normalize_relative_fhir_path(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    path = str(parsed.path or "").strip()
+    if "/fhir/" in path:
+        path = path.rsplit("/fhir/", 1)[1]
+    path = path.lstrip("/")
+    if path.startswith("fhir/"):
+        path = path[5:]
+    return path.rstrip("/")
+
+
+def _canonical_relative_fhir_path(
+    value: str,
+    *,
+    query_items: Optional[Iterable[tuple[str, str]]] = None,
+) -> str:
+    path = _normalize_relative_fhir_path(value)
+    if not path:
+        return ""
+    if query_items is None:
+        query_items = parse_qsl(urlsplit(str(value or "").strip()).query, keep_blank_values=True)
+    normalized_query_items = sorted((str(key), str(val)) for key, val in query_items)
+    if not normalized_query_items:
+        return path
+    return f"{path}?{urlencode(normalized_query_items, doseq=True)}"
+
+
+def _workflow_task_authorized_paths(task: dict[str, Any]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    allowed: list[str] = []
+    for item in task.get("input") or []:
+        if not isinstance(item, dict) or _task_input_is_parameter(item):
+            continue
+        canonical = _canonical_relative_fhir_path(_task_input_path_value(item))
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        allowed.append(canonical)
+    return tuple(allowed)
+
+
+def _workflow_task_allows_path(
+    task: dict[str, Any],
+    *,
+    relative_path: str,
+    query_items: Optional[Iterable[tuple[str, str]]] = None,
+) -> bool:
+    requested = _canonical_relative_fhir_path(relative_path, query_items=query_items)
+    if not requested:
+        return False
+    return requested in set(_workflow_task_authorized_paths(task))
+
+
+def _workflow_task_allows_binary(task: dict[str, Any]) -> bool:
+    for allowed_path in _workflow_task_authorized_paths(task):
+        resource_type = _normalize_relative_fhir_path(allowed_path).split("/", 1)[0]
+        if resource_type in {"Binary", "DocumentReference"}:
+            return True
+    return False
+
+
+def _ensure_requested_path_authorized(
+    task: dict[str, Any],
+    *,
+    relative_path: str,
+    query_items: Optional[Iterable[tuple[str, str]]] = None,
+    allow_document_reference_binary: bool = False,
+) -> None:
+    if _workflow_task_allows_path(task, relative_path=relative_path, query_items=query_items):
+        return
+    if allow_document_reference_binary and _workflow_task_allows_binary(task):
+        return
+    requested = _canonical_relative_fhir_path(relative_path, query_items=query_items)
+    _raise_http(
+        403,
+        "workflow_task_input_not_authorized",
+        "Opgevraagde FHIR route staat niet op de geautoriseerde workflow task.",
+        requested_path=requested or None,
+        authorized_paths=list(_workflow_task_authorized_paths(task)),
+    )
 
 
 def _resource_matches_patient(resource: dict[str, Any], *, patient_id: str, patient_bsn: str) -> bool:
@@ -891,6 +1005,11 @@ async def update_workflow_task(task_id: str, request: Request) -> Response:
 @app.get("/fhir/Observation/$lastn")
 async def observation_lastn(request: Request) -> Response:
     authz = await _authorize_request(request, require_professional=True, require_active_task=False)
+    _ensure_requested_path_authorized(
+        authz.task,
+        relative_path="Observation/$lastn",
+        query_items=list(request.query_params.multi_items()),
+    )
     authz = await _ensure_patient_loaded(authz)
     params = _patient_scoped_params("Observation", request, authz.patient_id, authz.patient_bsn)
     url = _join_url(settings.upstream_fhir_base, "Observation/$lastn")
@@ -912,6 +1031,11 @@ async def search_resource(resource_type: str, request: Request) -> Response:
         _raise_http(404, "resource_not_supported", "Deze FHIR resource wordt niet door de sender gateway ondersteund.")
 
     authz = await _authorize_request(request, require_professional=True, require_active_task=False)
+    _ensure_requested_path_authorized(
+        authz.task,
+        relative_path=resource_type,
+        query_items=list(request.query_params.multi_items()),
+    )
     authz = await _ensure_patient_loaded(authz)
     params = _patient_scoped_params(resource_type, request, authz.patient_id, authz.patient_bsn)
     url = _join_url(settings.upstream_fhir_base, resource_type)
@@ -934,6 +1058,11 @@ async def read_resource(resource_type: str, resource_id: str, request: Request) 
         _raise_http(404, "resource_not_supported", "Deze FHIR resource wordt niet door de sender gateway ondersteund.")
 
     authz = await _authorize_request(request, require_professional=True, require_active_task=False)
+    _ensure_requested_path_authorized(
+        authz.task,
+        relative_path=f"{resource_type}/{resource_id}",
+        allow_document_reference_binary=(resource_type == "Binary"),
+    )
     authz = await _ensure_patient_loaded(authz)
 
     if resource_type == "Binary":
