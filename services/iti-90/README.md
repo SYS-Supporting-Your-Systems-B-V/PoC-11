@@ -121,7 +121,7 @@ De tests stellen `MCSD_BASE=https://hapi.fhir.org/baseR4` automatisch in.
 Voor de Docker Compose stack in deze repository (`poc9-start-stack/docker-compose.yaml`) geldt:
 
 - service `iti-90-address-book-proxy` laadt settings uit `services/iti-90/.env.Docker` via `env_file`
-- pas dus voor stack-gedrag vooral `services/iti-90/.env.Docker` aan (met name `MCSD_BASE` en `MCSD_SENDER_*`)
+- pas dus voor stack-gedrag vooral `services/iti-90/.env.Docker` aan (met name `MCSD_BASE`, `MCSD_SENDER_*`, en `MCSD_RECEIVER_NOTIFICATION_SCOPE`)
 - bij handmatig lokaal starten (`python main.py` of `uvicorn`) wordt standaard `services/iti-90/.env` gebruikt, tenzij je `MCSD_ENV_FILE` zet
 
 #### Upstream mCSD/FHIR base
@@ -875,7 +875,7 @@ Response (globaal):
 - `workflow_task_id`: de workflow-task resource id op de sender
 - `workflow_task_identifier_system`: identifier system uit `Task.basedOn[0].identifier`
 - `workflow_task_identifier_value`: identifier value uit `Task.basedOn[0].identifier`
-- `authorization_base`: authorization-base die ook op de workflow task wordt opgeslagen
+- `authorization_base`: authorization-base die op de workflow task in `Task.input` en op de notification task in `Task.input` wordt opgeslagen
 - `sender_bgz_base`: de sender base (als gezet)
 
 Voorbeeldresponse:
@@ -960,7 +960,7 @@ De sender-identiteit komt uit environment variabelen (zie “BgZ sender-identite
 
 De notification Task zelf gebruikt de minimale Step 2 shape:
 - `basedOn[0].identifier` verwijst naar de primaire workflow-task identifier van de sender
-- `input.authorization-base` blijft aanwezig voor de follow-up pull en gateway-autorisatie
+- `input.authorization-base` blijft aanwezig als enige authorization-base drager voor de follow-up pull en gateway-autorisatie
 - velden zoals `description`, `for`, sender BgZ extension en `get-workflow-task` worden niet meer meegestuurd
 
 Voor PoC 11-13 geldt daarnaast:

@@ -1435,7 +1435,7 @@ def _init_sqlite_schema(conn: Connection, seed: bool = True, reset_seed: bool = 
         "active", ENDPOINT_CONN_SYSTEM, "direct-project", "Direct Project",
         NL_GF_DATA_EXCHANGE_CAPABILITIES_SYSTEM, "Nuts-OAuth", "Nuts OAuth endpoint",
         None,
-        "https://mach2.disyepd.com/nuts-oauth2", "Nuts OAuth2", None, None,
+        "https://mach2.disyepd.com/nuts-oauth2/oauth2/00700700", "Nuts OAuth2", None, None,
         "2020-01-01", None, 1, now
     ))
     # Dedicated mCSD directory endpoint for ITI-91 discovery/sync

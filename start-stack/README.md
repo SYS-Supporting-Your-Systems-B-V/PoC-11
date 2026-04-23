@@ -29,7 +29,8 @@ Before you start, review at least:
 
 - `iti-91.conf` for the ITI-91 update-client settings
 - `.env` for optional Compose profiles such as `caddy`
-- `../services/iti-90/.env.Docker` for ITI-90 upstream and sender settings
+- `../services/iti-90/.env.Docker` for ITI-90 upstream, sender settings, and `MCSD_RECEIVER_NOTIFICATION_SCOPE`
+- `.env` for optional BGZ scope overrides for `mock-notification-receiver` and `sender-bgz-gateway`
 - `../SECRETS.md` for the `secrets/<service>/...` layout and test cert generation
 
 ## Start
@@ -126,9 +127,13 @@ Use this table to identify what must be configured for your own setup.
 | `.env:COMPOSE_PROFILES` | `docker compose` | No | Optional profile toggles such as `caddy` |
 | `../services/iti-90/.env.Docker` | `iti-90-address-book-proxy` | Yes | ITI-90 runtime settings loaded via `env_file` |
 | `../services/iti-90/.env.Docker:MCSD_BASE` | `iti-90-address-book-proxy` | Yes | Upstream mCSD/FHIR base URL for ITI-90 |
+| `../services/iti-90/.env.Docker:MCSD_RECEIVER_NOTIFICATION_SCOPE` | `iti-90-address-book-proxy` | Required for BGZ policy scope selection | Receiver notification scope to request from Nuts, e.g. `bgz-receiver` |
 | `../secrets/iti-90/mtls/*` | `iti-90-address-book-proxy` | Alleen voor upstream mTLS | Test UZI clientcertificaat + key voor externe FHIR-server |
 | `../secrets/shared/nuts-development-network-ca/stable/ca.pem` | `iti-90-address-book-proxy` | Alleen voor upstream mTLS/TLS met Nuts stable CA | Trust anchor voor de externe FHIR-server |
 | `../secrets/mock-notification-receiver/dezi/*` | `mock-notification-receiver` | Ja voor DEZI login | Certificaat + private key voor `private_key_jwt` naar DEZI |
+| `.env:MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE` | `mock-notification-receiver` | Required for BGZ policy scope selection | Scope expected on incoming notification tokens, e.g. `bgz-receiver` |
+| `.env:MOCK_RECEIVER_SENDER_DATA_SCOPE` | `mock-notification-receiver` | Required for BGZ policy scope selection | Scope requested for follow-up sender data access, e.g. `bgz-sender` |
+| `.env:BGZ_GATEWAY_REQUIRED_SCOPES` | `sender-bgz-gateway` | Optional | Comma/JSON allowlist of accepted sender data scopes, e.g. `bgz-sender` |
 | `../secrets/nuts-node/tls/*` | `nuts-node` | Ja voor lokale Nuts TLS | TLS-certificaten die gemount worden naar `/opt/nuts/certs` |
 | `../services/iti-90/.env.Docker:MCSD_SENDER_*` | `iti-90-address-book-proxy` | Required for BgZ notify flow | Sender identity used in PoC notification flows |
 | `client.application.yaml` | `hapi-update-client` | Yes | HAPI config for update-client-side FHIR server |

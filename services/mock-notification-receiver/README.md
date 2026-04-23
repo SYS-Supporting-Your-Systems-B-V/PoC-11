@@ -56,7 +56,8 @@ Current notification authorization behavior:
 - the introspection result must contain `organization_ura`
 - the token `organization_ura` must match `Task.requester.onBehalfOf.identifier.value`
 - `Task.owner.identifier.value` must match the configured receiver organization URA
-- the token must include the configured receiver scope (default `eOverdracht-receiver`)
+- the token must include the configured receiver scope
+- when using `services/nuts-node/policies/BGZ_policy.json`, set `MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE=bgz-receiver` and `MOCK_RECEIVER_SENDER_DATA_SCOPE=bgz-sender`
 
 Current DEZI + protected pull behavior:
 
@@ -65,6 +66,7 @@ Current DEZI + protected pull behavior:
 - in the Docker stack these files are expected under `secrets/mock-notification-receiver/dezi/`
 - the userinfo response is decrypted and validated locally
 - the resulting DEZI id-token is included in the local Nuts `request-service-access-token` call
+- sender data pull requires a real DEZI login result; the receiver no longer falls back to a self-attested DEZI credential payload
 - the sender `Nuts-OAuth` endpoint is resolved from the Query Directory using the sender URA from the incoming notification task
 - the workflow task is fetched via `GET /fhir/Task?identifier=...` using `Task.basedOn[0].identifier`
 - subsequent sender pulls are derived from the fetched workflow task `Task.input` entries instead of a hardcoded receiver-side list
@@ -76,6 +78,8 @@ Important configuration:
 - `MOCK_RECEIVER_LOCAL_ADRESBOOK_FHIR_BASE`
 - `MOCK_RECEIVER_ORGANIZATION_URA`
 - `MOCK_RECEIVER_NUTS_SUBJECT_ID`
+- `MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE`
+- `MOCK_RECEIVER_SENDER_DATA_SCOPE`
 - `MOCK_RECEIVER_DEZI_WELL_KNOWN_URL`
 - `MOCK_RECEIVER_DEZI_CLIENT_ID`
 - `MOCK_RECEIVER_DEZI_CERTIFICATE_FILE`

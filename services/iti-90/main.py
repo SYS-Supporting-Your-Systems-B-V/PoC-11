@@ -1179,7 +1179,7 @@ def mscd_zoek_page():
 
 
 @app.get("/mcsd_bgz_verwijzing/", response_class=FileResponse, include_in_schema=False)
-def mscd_zoek_page():
+def mscd_bgz_verwijzing_page():
     return _serve_html_page(APP_ROOT / "mcsd_bgz_verwijzing.html")
 
 
@@ -1395,7 +1395,20 @@ async def _request_receiver_access_token(*, mapping: Dict[str, Any], sender_subj
         f"{nuts_internal_base.rstrip('/')}/internal/auth/v2/"
         f"{quote(subject_id, safe='')}/request-service-access-token"
     )
-    scope = str(settings.receiver_notification_scope or "").strip() or "eOverdracht-receiver"
+    scope = str(settings.receiver_notification_scope or "").strip()
+    if scope == "":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "reason": "receiver_access_token_request_failed",
+                "message": "settings.receiver_notification_scope was leeg, geen policy geselecteerd!",
+                "details": {
+                    "classification": "",
+                    "nuts_internal_base": nuts_internal_base,
+                    "authorization_server": auth_server_url,
+                },
+            },
+        ) 
     payload = {
         "authorization_server": auth_server_url,
         "scope": scope,
@@ -3738,7 +3751,6 @@ IG_CAPABILITY_SYSTEM = "http://nuts-foundation.github.io/nl-generic-functions-ig
 
 # PoC 9 extension: explicit sender BgZ FHIR base URL for receivers that do not resolve sender endpoints via URA/mCSD.
 TASK_EXT_SENDER_BGZ_BASE_URL = "http://example.org/fhir/StructureDefinition/sender-bgz-base"
-TASK_IDENTIFIER_AUTHORIZATION_BASE_SYSTEM = "https://sys.local/fhir/NamingSystem/task-authorization-base"
 TASK_IDENTIFIER_RFC3986_SYSTEM = "urn:ietf:rfc:3986"
 SENDER_SOFTWARE_IDENTIFIER_PATTERN = re.compile(r"^urn:(oid|uuid):.+$", re.IGNORECASE)
 
@@ -5066,21 +5078,6 @@ def _build_bgz_workflow_task(
         tb.set_group_identifier(str(group_identifier))
     tb.set_task_identifier(str(workflow_task_identifier_value))
     tb.set_authorization_base(str(authorization_base))
-    identifier_list = _ensure_list(tb.task, "identifier")
-    identifier_list[:] = [
-        ident
-        for ident in identifier_list
-        if not (
-            isinstance(ident, dict)
-            and str(ident.get("system") or "") == TASK_IDENTIFIER_AUTHORIZATION_BASE_SYSTEM
-        )
-    ]
-    identifier_list.append(
-        {
-            "system": TASK_IDENTIFIER_AUTHORIZATION_BASE_SYSTEM,
-            "value": str(authorization_base),
-        }
-    )
     now = datetime.now(timezone.utc)
     tb.set_authored_on(now)
     tb.set_restriction_end(now + timedelta(days=365))

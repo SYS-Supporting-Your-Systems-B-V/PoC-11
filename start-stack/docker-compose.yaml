@@ -75,7 +75,6 @@ services:
     environment:
       BGZ_GATEWAY_UPSTREAM_FHIR_BASE: http://hapi-notifiedpull-stu3:8082/fhir
       BGZ_GATEWAY_NUTS_INTERNAL_BASE: http://nuts-node:8083
-      BGZ_GATEWAY_AUTHORIZATION_BASE_SYSTEM: https://sys.local/fhir/NamingSystem/task-authorization-base
       BGZ_GATEWAY_PATIENT_IDENTIFIER_SYSTEM: http://fhir.nl/fhir/NamingSystem/bsn
       BGZ_GATEWAY_MEDICAL_ROLE_VALUESET_URL: ${BGZ_GATEWAY_MEDICAL_ROLE_VALUESET_URL:-https://decor.nictiz.nl/pub/eoverdracht/e-overdracht-html-20120928T120000/vs-2.16.840.1.113883.2.4.15.111.html}
       BGZ_GATEWAY_MEDICAL_ROLE_CODES: ${BGZ_GATEWAY_MEDICAL_ROLE_CODES:-}
@@ -105,6 +104,7 @@ services:
       MOCK_RECEIVER_DEZI_CALLBACK_PATH: ${MOCK_RECEIVER_DEZI_CALLBACK_PATH:-auth/dezi/callback}
       MOCK_RECEIVER_DEZI_CERTIFICATE_FILE: ${MOCK_RECEIVER_DEZI_CERTIFICATE_FILE:-/secrets/mock-notification-receiver/dezi/certificaat_SYS_DEZI.crt}
       MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE: ${MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE:-/secrets/mock-notification-receiver/dezi/sleutel_SYS_DEZI.key}
+      MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE: ${MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE:-eOverdracht-receiver}
       MOCK_RECEIVER_SENDER_DATA_SCOPE: ${MOCK_RECEIVER_SENDER_DATA_SCOPE:-eOverdracht-sender}
     networks:
       - mcsd_update_client_net
@@ -281,6 +281,7 @@ services:
       - "443:443"
     volumes:
       - ./caddy/${CADDYFILE_NAME:-Caddyfile}:/etc/caddy/Caddyfile:ro
+      - ../services/nuts-node/contexts:/srv/contexts:ro
       - caddy_data:/data
       - caddy_config:/config
     secrets:

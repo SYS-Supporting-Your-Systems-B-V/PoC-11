@@ -279,6 +279,9 @@ def appmod(monkeypatch):
     monkeypatch.setattr(mod.settings, "sender_bgz_base", None, raising=False)
     monkeypatch.setattr(mod.settings, "sender_bgz_public_base", None, raising=False)
     monkeypatch.setattr(mod.settings, "sender_bgz_storage_base", "http://sender-storage.example/fhir", raising=False)
+    monkeypatch.setattr(mod.settings, "receiver_notification_scope", "bgz-receiver", raising=False)
+    monkeypatch.setattr(mod.settings, "mtls_cert_file", None, raising=False)
+    monkeypatch.setattr(mod.settings, "mtls_key_file", None, raising=False)
     monkeypatch.setattr(mod.settings, "is_production", False, raising=False)
     monkeypatch.setattr(mod.settings, "allow_task_preview_in_production", True, raising=False)
     monkeypatch.setattr(mod.settings, "verify_tls", False, raising=False)
@@ -882,7 +885,7 @@ def test_bgz_notify_posts_task_and_returns_result(appmod, client, monkeypatch):
     assert token_post["url"] == "http://nuts-node:8083/internal/auth/v2/00700700/request-service-access-token"
     assert token_post["json"] == {
         "authorization_server": "https://receiver.example/nuts-oauth2/oauth2/87654321",
-        "scope": "eOverdracht-receiver",
+        "scope": "bgz-receiver",
         "token_type": "Bearer",
     }
 
@@ -957,19 +960,14 @@ def test_bgz_notify_uses_public_base_and_storage_base_and_persists_authorization
     assert put_call["url"] == "http://hapi-notifiedpull-stu3:8082/fhir/Task/wf-777"
 
     workflow_task = put_call["json"]
-    auth_identifier = _find_task_identifier(
-        workflow_task,
-        "https://sys.local/fhir/NamingSystem/task-authorization-base",
-    )
-    assert auth_identifier is not None
-    assert auth_identifier["value"]
     workflow_identifier = _find_task_identifier(workflow_task, "urn:ietf:rfc:3986")
     assert workflow_identifier is not None
     _assert_urn_uuid(workflow_identifier["value"])
 
     auth_input = _find_task_input(workflow_task, "authorization-base")
     assert auth_input is not None
-    assert auth_input["valueString"] == auth_identifier["value"]
+    assert isinstance(auth_input["valueString"], str) and auth_input["valueString"]
+    assert _find_task_identifier(workflow_task, "https://sys.local/fhir/NamingSystem/task-authorization-base") is None
 
     assert len(fake.post_calls) == 2
     assert fake.post_calls[0]["url"] == "http://nuts-node:8083/internal/auth/v2/00700700/request-service-access-token"
@@ -982,4 +980,4 @@ def test_bgz_notify_uses_public_base_and_storage_base_and_persists_authorization
     assert notification_task["basedOn"][0]["identifier"]["value"] == workflow_identifier["value"]
     notification_auth_input = _find_task_input(notification_task, "authorization-base")
     assert notification_auth_input is not None
-    assert notification_auth_input["valueString"] == auth_identifier["value"]
+    assert notification_auth_input["valueString"] == auth_input["valueString"]

@@ -22,10 +22,6 @@ class Settings(BaseSettings):
         "http://nuts-node:8083",
         validation_alias="BGZ_GATEWAY_NUTS_INTERNAL_BASE",
     )
-    authorization_base_system: str = Field(
-        "https://sys.local/fhir/NamingSystem/task-authorization-base",
-        validation_alias="BGZ_GATEWAY_AUTHORIZATION_BASE_SYSTEM",
-    )
     patient_identifier_system: str = Field(
         "http://fhir.nl/fhir/NamingSystem/bsn",
         validation_alias="BGZ_GATEWAY_PATIENT_IDENTIFIER_SYSTEM",

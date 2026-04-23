@@ -1,4 +1,4 @@
-FROM nutsfoundation/nuts-node:6.2.0
+FROM nutsfoundation/nuts-node:project-gf
 
 USER root
 

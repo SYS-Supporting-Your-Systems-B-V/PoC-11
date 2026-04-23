@@ -41,15 +41,12 @@ UPSTREAM_REQUEST_HEADERS = {
 }
 ALLOWED_DATA_RESOURCES = {
     "Patient",
-    "Condition",
-    "AllergyIntolerance",
-    "MedicationStatement",
     "Observation",
-    "DocumentReference",
-    "Binary",
 }
 AUTHORIZATION_BASE_HEADER = "X-Authorization-Base"
 TASK_PARAMETER_SYSTEM = "http://fhir.nl/fhir/NamingSystem/TaskParameter"
+# Legacy repo-specific identifier system kept only so PUT updates can strip old data.
+LEGACY_AUTHORIZATION_BASE_IDENTIFIER_SYSTEM = "https://sys.local/fhir/NamingSystem/task-authorization-base"
 TERMINAL_TASK_STATUSES = {
     "cancelled",
     "canceled",
@@ -251,12 +248,15 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
             ("claims", "roles"),
             ("claims", "roleName"),
             ("claims", "role_name"),
+            ("claims", "user_role"),
             ("subject", "properties", "subject_role"),
             ("subject", "properties", "employee_roles"),
             ("subject", "properties", "roles"),
             ("subject", "properties", "roleName"),
             ("subject", "properties", "role_name"),
+            ("subject", "properties", "user_role"),
             ("employee", "roleName"),
+            ("employee", "role"),
         )
     )
     if not roles:
@@ -291,6 +291,7 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
             _first_non_empty(
                 data,
                 ("employee_identifier",),
+                ("user_id",),
                 ("Dezi_id",),
                 ("dezi_id",),
                 ("uzi_id",),
@@ -298,6 +299,7 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
                 ("username",),
                 ("identifier",),
                 ("claims", "employee_identifier"),
+                ("claims", "user_id"),
                 ("claims", "Dezi_id"),
                 ("claims", "dezi_id"),
                 ("claims", "uzi_id"),
@@ -305,6 +307,7 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
                 ("claims", "username"),
                 ("claims", "identifier"),
                 ("subject", "properties", "subject_id"),
+                ("subject", "properties", "user_id"),
                 ("subject", "properties", "Dezi_id"),
                 ("subject", "properties", "dezi_id"),
                 ("subject", "properties", "uzi_id"),
@@ -392,14 +395,6 @@ def _request_task_identifier(request: Request) -> tuple[str, str]:
 
 
 def _task_has_authorization_base(task: dict[str, Any], authorization_base: str) -> bool:
-    for ident in task.get("identifier") or []:
-        if not isinstance(ident, dict):
-            continue
-        if (
-            str(ident.get("system") or "") == settings.authorization_base_system
-            and str(ident.get("value") or "") == authorization_base
-        ):
-            return True
     for item in task.get("input") or []:
         if not isinstance(item, dict):
             continue
@@ -504,24 +499,13 @@ def _workflow_task_allows_path(
     return requested in set(_workflow_task_authorized_paths(task))
 
 
-def _workflow_task_allows_binary(task: dict[str, Any]) -> bool:
-    for allowed_path in _workflow_task_authorized_paths(task):
-        resource_type = _normalize_relative_fhir_path(allowed_path).split("/", 1)[0]
-        if resource_type in {"Binary", "DocumentReference"}:
-            return True
-    return False
-
-
 def _ensure_requested_path_authorized(
     task: dict[str, Any],
     *,
     relative_path: str,
     query_items: Optional[Iterable[tuple[str, str]]] = None,
-    allow_document_reference_binary: bool = False,
 ) -> None:
     if _workflow_task_allows_path(task, relative_path=relative_path, query_items=query_items):
-        return
-    if allow_document_reference_binary and _workflow_task_allows_binary(task):
         return
     requested = _canonical_relative_fhir_path(relative_path, query_items=query_items)
     _raise_http(
@@ -625,27 +609,21 @@ def _filter_bundle_to_patient(bundle: dict[str, Any], *, primary_type: str, pati
 
 def _ensure_task_update_payload(existing_task: dict[str, Any], incoming_task: dict[str, Any], authorization_base: str) -> dict[str, Any]:
     updated = copy.deepcopy(existing_task)
-    allowed_mutable_fields = {"status", "businessStatus", "statusReason", "note", "output", "restriction"}
+    allowed_mutable_fields = {"status", "businessStatus", "statusReason"}
     for field in allowed_mutable_fields:
         if field in incoming_task:
             updated[field] = copy.deepcopy(incoming_task[field])
     updated["resourceType"] = "Task"
     updated["id"] = str(existing_task.get("id") or "")
-
-    identifiers = []
-    for ident in updated.get("identifier") or []:
-        if not isinstance(ident, dict):
-            continue
-        if str(ident.get("system") or "") == settings.authorization_base_system:
-            continue
-        identifiers.append(copy.deepcopy(ident))
-    identifiers.append(
-        {
-            "system": settings.authorization_base_system,
-            "value": authorization_base,
-        }
-    )
-    updated["identifier"] = identifiers
+    updated["identifier"] = [
+        copy.deepcopy(ident)
+        for ident in updated.get("identifier") or []
+        if not (
+            isinstance(ident, dict)
+            and str(ident.get("system") or "") == LEGACY_AUTHORIZATION_BASE_IDENTIFIER_SYSTEM
+            and str(ident.get("value") or "") == authorization_base
+        )
+    ]
 
     inputs = []
     auth_input_present = False
@@ -807,10 +785,7 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
 
     bundle = await _upstream_get_json(
         "Task",
-        params=[
-            ("identifier", f"{settings.authorization_base_system}|{token_ctx.authorization_base}"),
-            ("_count", "5"),
-        ],
+        params=[("_count", "200")],
     )
     tasks = [
         task
@@ -865,29 +840,6 @@ async def _ensure_patient_loaded(authz: WorkflowAuthorization) -> WorkflowAuthor
         _raise_http(409, "authorized_patient_not_unique", "Meerdere patiënten gevonden voor de geautoriseerde BSN.")
     authz.patient_resource = patients[0]
     return authz
-
-
-async def _binary_allowed(authz: WorkflowAuthorization, binary_id: str) -> bool:
-    authz = await _ensure_patient_loaded(authz)
-    bundle = await _upstream_get_json(
-        "DocumentReference",
-        params=[("patient", authz.patient_id), ("_count", "200")],
-    )
-    target_ref = f"Binary/{binary_id}"
-    for docref in _bundle_resources(bundle, "DocumentReference"):
-        if not _resource_matches_patient(docref, patient_id=authz.patient_id, patient_bsn=authz.patient_bsn):
-            continue
-        for content in docref.get("content") or []:
-            if not isinstance(content, dict):
-                continue
-            attachment = content.get("attachment") or {}
-            if not isinstance(attachment, dict):
-                continue
-            for key in ("url", "reference"):
-                ref = _normalize_reference(attachment.get(key))
-                if ref == target_ref:
-                    return True
-    return False
 
 
 def _patient_scoped_params(resource_type: str, request: Request, patient_id: str, patient_bsn: str) -> list[tuple[str, str]]:
@@ -1027,7 +979,7 @@ async def observation_lastn(request: Request) -> Response:
 async def search_resource(resource_type: str, request: Request) -> Response:
     if resource_type == "Task":
         _raise_http(405, "task_search_not_supported", "Gebruik Task/{id} voor de geautoriseerde workflow task.")
-    if resource_type not in ALLOWED_DATA_RESOURCES or resource_type == "Binary":
+    if resource_type not in ALLOWED_DATA_RESOURCES:
         _raise_http(404, "resource_not_supported", "Deze FHIR resource wordt niet door de sender gateway ondersteund.")
 
     authz = await _authorize_request(request, require_professional=True, require_active_task=False)
@@ -1061,16 +1013,8 @@ async def read_resource(resource_type: str, resource_id: str, request: Request) 
     _ensure_requested_path_authorized(
         authz.task,
         relative_path=f"{resource_type}/{resource_id}",
-        allow_document_reference_binary=(resource_type == "Binary"),
     )
     authz = await _ensure_patient_loaded(authz)
-
-    if resource_type == "Binary":
-        if not await _binary_allowed(authz, resource_id):
-            _raise_http(403, "binary_not_authorized", "Binary resource hoort niet bij de geautoriseerde patiëntcontext.")
-        url = _join_url(settings.upstream_fhir_base, f"Binary/{resource_id}")
-        response = await app.state.http_client.get(url, headers=_proxy_headers_from_request(request))
-        return _pass_through_response(response)
 
     url = _join_url(settings.upstream_fhir_base, f"{resource_type}/{resource_id}")
     response = await app.state.http_client.get(url, headers=_proxy_headers_from_request(request))

@@ -98,17 +98,28 @@ def _workflow_task(
     *,
     status: str = "requested",
     data_inputs: Optional[List[str]] = None,
+    include_legacy_auth_identifier: bool = False,
 ) -> Dict[str, Any]:
     if data_inputs is None:
         data_inputs = [
             "Patient",
             "Patient?_include=Patient:general-practitioner",
-            "Observation/$lastn",
-            "Condition",
-            "AllergyIntolerance",
-            "MedicationStatement",
-            "DocumentReference",
+            "Observation/$lastn?code=http://loinc.org|85354-9",
+            "Observation/$lastn?code=http://loinc.org|29463-7",
         ]
+    identifiers = [
+        {
+            "system": "urn:ietf:rfc:3986",
+            "value": "urn:uuid:11111111-1111-1111-1111-111111111111",
+        }
+    ]
+    if include_legacy_auth_identifier:
+        identifiers.append(
+            {
+                "system": "https://sys.local/fhir/NamingSystem/task-authorization-base",
+                "value": "auth-123",
+            }
+        )
     return {
         "resourceType": "Task",
         "id": "wf-1",
@@ -125,16 +136,7 @@ def _workflow_task(
                 "value": "999999990",
             }
         },
-        "identifier": [
-            {
-                "system": "urn:ietf:rfc:3986",
-                "value": "urn:uuid:11111111-1111-1111-1111-111111111111",
-            },
-            {
-                "system": appmod.settings.authorization_base_system,
-                "value": "auth-123",
-            }
-        ],
+        "identifier": identifiers,
         "input": [
             {
                 "type": {
@@ -172,7 +174,7 @@ def _introspection_payload(**overrides: Any) -> Dict[str, Any]:
         "authorization-base": "auth-123",
         "employee_identifier": "dezi-001",
         "employee_roles": ["doctor"],
-        "scope": "eOverdracht-sender",
+        "scope": "bgz-sender",
     }
     base.update(overrides)
     return base
@@ -227,12 +229,6 @@ def _set_gateway_settings(monkeypatch, appmod) -> None:
     monkeypatch.setattr(appmod.settings, "nuts_internal_base", "http://nuts-node:8083", raising=False)
     monkeypatch.setattr(
         appmod.settings,
-        "authorization_base_system",
-        "https://sys.local/fhir/NamingSystem/task-authorization-base",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        appmod.settings,
         "patient_identifier_system",
         "http://fhir.nl/fhir/NamingSystem/bsn",
         raising=False,
@@ -276,10 +272,7 @@ def test_task_read_authorized(monkeypatch):
 
     assert response.status_code == 200, response.text
     assert response.json()["id"] == "wf-1"
-    assert fake.calls[1]["params"] == [
-        ("identifier", "https://sys.local/fhir/NamingSystem/task-authorization-base|auth-123"),
-        ("_count", "5"),
-    ]
+    assert fake.calls[1]["params"] == [("_count", "200")]
 
 
 def test_task_read_accepts_authorization_base_header_fallback(monkeypatch):
@@ -302,10 +295,7 @@ def test_task_read_accepts_authorization_base_header_fallback(monkeypatch):
         )
 
     assert response.status_code == 200, response.text
-    assert fake.calls[1]["params"] == [
-        ("identifier", "https://sys.local/fhir/NamingSystem/task-authorization-base|auth-123"),
-        ("_count", "5"),
-    ]
+    assert fake.calls[1]["params"] == [("_count", "200")]
 
 
 def test_task_read_accepts_subject_id_fallback_for_organization(monkeypatch):
@@ -494,6 +484,56 @@ def test_patient_search_accepts_raw_dezi_claim_names(monkeypatch):
     assert response.json()["total"] == 1
 
 
+def test_patient_search_accepts_bgz_claim_names(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(
+            200,
+            _introspection_payload(
+                employee_identifier="",
+                employee_roles=[],
+                user_id="dezi-001",
+                user_role="doctor",
+            ),
+        ),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Patient", headers=_auth_headers())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+
+
+def test_patient_search_rejects_custom_dezi_header_without_introspection_claims(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload(employee_identifier="", employee_roles=[])),
+    )
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get(
+            "/fhir/Patient",
+            headers={**_auth_headers(), "X-Dezi-Userinfo-JWT": "signed-dezi-userinfo-jwt"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "missing_employee_identifier"
+
+
 def test_patient_search_scopes_to_authorized_patient_and_keeps_include(monkeypatch):
     appmod = _import_app_module()
     _set_gateway_settings(monkeypatch, appmod)
@@ -606,7 +646,7 @@ def test_task_update_preserves_authorization_base(monkeypatch):
         "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
         DummyResponse(200, _introspection_payload()),
     )
-    task = _workflow_task(appmod, status="requested")
+    task = _workflow_task(appmod, status="requested", include_legacy_auth_identifier=True)
     fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(task)))
     fake.queue("PUT", "http://upstream/fhir/Task/wf-1", DummyResponse(200, _workflow_task(appmod, status="completed")))
 
@@ -621,9 +661,8 @@ def test_task_update_preserves_authorization_base(monkeypatch):
     assert response.status_code == 200, response.text
     upstream_payload = fake.calls[2]["json"]
     assert upstream_payload["status"] == "completed"
-    assert any(
+    assert not any(
         ident.get("system") == "https://sys.local/fhir/NamingSystem/task-authorization-base"
-        and ident.get("value") == "auth-123"
         for ident in upstream_payload["identifier"]
     )
     assert any(

@@ -12,7 +12,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Optional
@@ -331,6 +331,55 @@ def _jwt_segment_payload(token: str) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _dezi_claim_presence(claims: dict[str, Any]) -> dict[str, bool]:
+    return {
+        "abonnee_nummer": bool(str(claims.get("abonnee_nummer") or "").strip()),
+        "dezi_nummer": bool(str(claims.get("dezi_nummer") or "").strip()),
+    }
+
+
+def _legacy_dezi_claims_from_userinfo(claims: dict[str, Any]) -> dict[str, Any]:
+    relation: dict[str, Any] = {}
+    for candidate in claims.get("relations") or []:
+        if isinstance(candidate, dict):
+            relation = candidate
+            break
+    roles = _string_list(relation.get("roles"))
+    mapped = {
+        "iss": claims.get("iss"),
+        "sub": claims.get("sub"),
+        "aud": claims.get("aud"),
+        "nbf": claims.get("nbf"),
+        "exp": claims.get("exp"),
+        "dezi_nummer": claims.get("uzi_id"),
+        "abonnee_nummer": relation.get("ura"),
+        "abonnee_naam": relation.get("entity_name"),
+        "voorletters": claims.get("initials"),
+        "voorvoegsel": claims.get("surname_prefix"),
+        "achternaam": claims.get("surname"),
+        "rol": roles[0] if roles else None,
+    }
+    return {key: value for key, value in mapped.items() if value not in (None, "", [], {})}
+
+
+def _unsigned_jwt_from_claims(claims: dict[str, Any]) -> str:
+    header = {"alg": "PS256", "typ": "JWT"}
+    return ".".join(
+        (
+            _base64url(json.dumps(header, separators=(",", ":")).encode("utf-8")),
+            _base64url(json.dumps(claims, separators=(",", ":")).encode("utf-8")),
+            "c2ln",
+        )
+    )
+
+
+def _mapped_dezi_id_token_from_userinfo_jwt(token: str) -> str | None:
+    mapped_claims = _legacy_dezi_claims_from_userinfo(_jwt_segment_payload(token))
+    if not all(_dezi_claim_presence(mapped_claims).values()):
+        return None
+    return _unsigned_jwt_from_claims(mapped_claims)
 
 
 def _ui_html() -> str:
@@ -1246,6 +1295,15 @@ async def _perform_dezi_login(session: UserSession, *, code: str) -> UserSession
                 audience=_dezi_client_id(),
                 nonce=str(session.pending_nonce or "").strip() or None,
             )
+            logger.info(
+                "DEZI token exchange complete: scope=%s id_token_claims=%s userinfo_claims=%s id_token_keys=%s userinfo_keys=%s derived_identity=%s",
+                str(token_payload.get("scope") or "").strip() or None,
+                _dezi_claim_presence(token_claims),
+                _dezi_claim_presence(userinfo_claims),
+                sorted(token_claims.keys()),
+                sorted(userinfo_claims.keys()),
+                _dezi_identity_from_claims(userinfo_claims),
+            )
 
     session.dezi_logged_in_at = _now_iso()
     session.dezi_identity = _dezi_identity_from_claims(userinfo_claims)
@@ -1339,6 +1397,7 @@ def _extract_employee_identifier_from_introspection(data: dict[str, Any]) -> str
         _first_non_empty(
             data,
             ("employee_identifier",),
+            ("user_id",),
             ("Dezi_id",),
             ("dezi_id",),
             ("uzi_id",),
@@ -1346,6 +1405,7 @@ def _extract_employee_identifier_from_introspection(data: dict[str, Any]) -> str
             ("username",),
             ("identifier",),
             ("claims", "employee_identifier"),
+            ("claims", "user_id"),
             ("claims", "Dezi_id"),
             ("claims", "dezi_id"),
             ("claims", "uzi_id"),
@@ -1353,6 +1413,7 @@ def _extract_employee_identifier_from_introspection(data: dict[str, Any]) -> str
             ("claims", "username"),
             ("claims", "identifier"),
             ("subject", "properties", "subject_id"),
+            ("subject", "properties", "user_id"),
             ("subject", "properties", "Dezi_id"),
             ("subject", "properties", "dezi_id"),
             ("subject", "properties", "uzi_id"),
@@ -1378,12 +1439,15 @@ def _extract_employee_roles_from_introspection(data: dict[str, Any]) -> list[str
             ("claims", "roles"),
             ("claims", "roleName"),
             ("claims", "role_name"),
+            ("claims", "user_role"),
             ("subject", "properties", "subject_role"),
             ("subject", "properties", "employee_roles"),
             ("subject", "properties", "roles"),
             ("subject", "properties", "roleName"),
             ("subject", "properties", "role_name"),
+            ("subject", "properties", "user_role"),
             ("employee", "roleName"),
+            ("employee", "role"),
         )
     )
     if not roles:
@@ -1433,8 +1497,11 @@ def _sender_access_token_summary(token_payload: dict[str, Any], introspection: d
 def _build_sender_additional_credentials(session: UserSession) -> list[dict[str, Any]]:
     identity = session.dezi_identity if isinstance(session.dezi_identity, dict) else {}
     employee_identifier = str(identity.get("employee_identifier") or "").strip()
+    organization_ura = str(identity.get("organization_ura") or settings.receiver_organization_ura or "").strip()
     roles = _string_list(identity.get("roles"))
-    display_name = str(identity.get("display_name") or "").strip()
+    initials = str(identity.get("initials") or "").strip()
+    surname = str(identity.get("surname") or "").strip()
+    surname_prefix = str(identity.get("surname_prefix") or "").strip()
     if not employee_identifier:
         return []
 
@@ -1443,23 +1510,140 @@ def _build_sender_additional_credentials(session: UserSession) -> list[dict[str,
 
     credentials: list[dict[str, Any]] = []
     for role in roles:
-        subject: dict[str, Any] = {"identifier": employee_identifier}
-        if display_name:
-            subject["name"] = display_name
+        employee: dict[str, Any] = {"identifier": employee_identifier}
+        if initials:
+            employee["initials"] = initials
+        if surname:
+            employee["surname"] = surname
+        if surname_prefix:
+            employee["surnamePrefix"] = surname_prefix
         role_value = str(role or "").strip()
         if role_value:
-            subject["roleName"] = role_value
+            employee["role"] = role_value
+        subject: dict[str, Any] = {
+            "identifier": organization_ura,
+            "employee": employee,
+        }
         credentials.append(
             {
                 "@context": [
                     "https://www.w3.org/2018/credentials/v1",
-                    "https://nuts.nl/credentials/v1",
+                    "https://mach2.disyepd.com/contexts/dezi-user-credential-v1.ldjson",
                 ],
-                "type": ["VerifiableCredential", "NutsEmployeeCredential"],
+                "type": "DeziUserCredential",
                 "credentialSubject": subject,
             }
         )
     return credentials
+
+
+def _resolve_sender_subject_id(task: dict[str, Any]) -> str:
+    return (
+        str(settings.receiver_nuts_subject_id or "").strip()
+        or str(_extract_task_owner_ura(task) or "").strip()
+        or str(settings.receiver_organization_ura or "").strip()
+        or _dezi_client_id()
+    )
+
+
+async def _resolve_subject_did(subject_id: str) -> str:
+    subject = str(subject_id or "").strip()
+    if not subject:
+        _raise_http(500, "misconfigured", "Geen receiver Nuts subject-id beschikbaar voor credential uitgifte.")
+
+    url = _join_url(settings.nuts_internal_base, f"/internal/vdr/v2/subject/{quote(subject, safe='')}")
+    try:
+        response = await app.state.http_client.get(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=settings.sender_token_timeout,
+        )
+    except httpx.HTTPError as exc:
+        _raise_http(502, "sender_credential_issue_failed", "Het ophalen van de receiver DID via Nuts is mislukt.", error=str(exc))
+    if response.status_code >= 400:
+        _raise_http(
+            502,
+            "sender_credential_issue_failed",
+            "De Nuts node gaf een fout terug bij het ophalen van de receiver DID.",
+            status_code=response.status_code,
+            upstream_body=response.text[:1000],
+        )
+    try:
+        body = response.json()
+    except Exception as exc:
+        _raise_http(502, "sender_credential_issue_failed", "De Nuts node gaf geen geldige JSON terug voor de receiver DID lookup.", error=str(exc))
+    if not isinstance(body, list):
+        _raise_http(502, "sender_credential_issue_failed", "De Nuts node gaf geen DID lijst terug voor de receiver subject lookup.")
+    for did in body:
+        value = str(did or "").strip()
+        if value.startswith("did:web:"):
+            return value
+    if body:
+        return str(body[0] or "").strip()
+    _raise_http(502, "sender_credential_issue_failed", "Geen DID gevonden voor receiver subject in de Nuts node.", subject_id=subject)
+
+
+async def _issue_sender_additional_credentials(*, subject_id: str, credentials: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not credentials:
+        return []
+
+    issuer_did = await _resolve_subject_did(subject_id)
+    issue_url = _join_url(settings.nuts_internal_base, "/internal/vcr/v2/issuer/vc")
+    expiration = (_now_utc() + timedelta(hours=8)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    issued: list[dict[str, Any]] = []
+
+    for credential in credentials:
+        subject = copy.deepcopy(credential.get("credentialSubject") or {})
+        if not isinstance(subject, dict):
+            continue
+        payload = {
+            "@context": credential.get("@context"),
+            "issuer": issuer_did,
+            "type": "DeziUserCredential",
+            "expirationDate": expiration,
+            "credentialSubject": {
+                "id": issuer_did,
+                **subject,
+            },
+        }
+        try:
+            response = await app.state.http_client.post(
+                issue_url,
+                json=payload,
+                headers={"Accept": "application/json"},
+                timeout=settings.sender_token_timeout,
+            )
+        except httpx.HTTPError as exc:
+            _raise_http(502, "sender_credential_issue_failed", "Het issuën van een sender DeziUserCredential via Nuts is mislukt.", error=str(exc))
+        if response.status_code >= 400:
+            _raise_http(
+                502,
+                "sender_credential_issue_failed",
+                "De Nuts node gaf een fout terug bij het issuën van een sender DeziUserCredential.",
+                status_code=response.status_code,
+                upstream_body=response.text[:1000],
+            )
+        try:
+            body = response.json()
+        except Exception as exc:
+            _raise_http(502, "sender_credential_issue_failed", "De Nuts node gaf geen geldige JSON terug voor de sender DeziUserCredential.", error=str(exc))
+        if not isinstance(body, dict):
+            _raise_http(502, "sender_credential_issue_failed", "De Nuts node gaf geen credential object terug voor de sender DeziUserCredential.")
+        issued.append(body)
+    return issued
+
+
+def _sender_attestation_inputs(session: UserSession) -> tuple[str, Optional[str], list[dict[str, Any]]]:
+    dezi_userinfo_jwt = str(session.dezi_userinfo_jwt or "").strip() or None
+    if dezi_userinfo_jwt:
+        mapped_id_token = _mapped_dezi_id_token_from_userinfo_jwt(dezi_userinfo_jwt)
+        if mapped_id_token:
+            return "mapped_userinfo_jwt", mapped_id_token, []
+        return "userinfo_jwt", dezi_userinfo_jwt, []
+    dezi_id_token = str(session.dezi_id_token or "").strip() or None
+    if dezi_id_token:
+        return "id_token", dezi_id_token, []
+    return "none", None, []
 
 
 async def _select_sender_access_token(
@@ -1468,8 +1652,8 @@ async def _select_sender_access_token(
     sender_oauth_endpoint: str,
     session: UserSession,
 ) -> tuple[dict[str, Any], str, dict[str, Any], list[dict[str, Any]]]:
-    additional_credentials = _build_sender_additional_credentials(session)
-    if not additional_credentials:
+    attestation_source, dezi_id_token, additional_credentials = _sender_attestation_inputs(session)
+    if not dezi_id_token and not additional_credentials:
         _raise_http(401, "dezi_login_required", "Log eerst in via DEZI voordat je sender data kunt ophalen.")
 
     chosen_token_payload: dict[str, Any] | None = None
@@ -1481,11 +1665,13 @@ async def _select_sender_access_token(
     token_payload = await _request_sender_access_token(
         task=task,
         sender_oauth_endpoint=sender_oauth_endpoint,
+        id_token=dezi_id_token,
+        id_token_source=attestation_source if dezi_id_token else None,
         additional_credentials=additional_credentials,
     )
     access_token = str(token_payload.get("access_token") or "").strip()
     introspection = await _introspect_access_token_payload(access_token)
-    summary = _sender_access_token_summary(token_payload, introspection, "credentials")
+    summary = _sender_access_token_summary(token_payload, introspection, attestation_source)
     evaluated.append(summary)
     score = (
         1 if summary["employee_identifier_present"] and summary["employee_roles_present"] else 0,
@@ -1507,14 +1693,11 @@ async def _request_sender_access_token(
     *,
     task: dict[str, Any],
     sender_oauth_endpoint: str,
+    id_token: str | None = None,
+    id_token_source: str | None = None,
     additional_credentials: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    subject_id = (
-        str(settings.receiver_nuts_subject_id or "").strip()
-        or str(_extract_task_owner_ura(task) or "").strip()
-        or str(settings.receiver_organization_ura or "").strip()
-        or _dezi_client_id()
-    )
+    subject_id = _resolve_sender_subject_id(task)
     if not subject_id:
         _raise_http(500, "misconfigured", "Geen receiver Nuts subject-id beschikbaar voor de sender tokenaanvraag.")
 
@@ -1527,8 +1710,18 @@ async def _request_sender_access_token(
     if not scope:
         _raise_http(500, "misconfigured", "Geen sender scope geconfigureerd voor de sender tokenaanvraag.")
     payload["scope"] = scope
+    id_token_value = str(id_token or "").strip()
+    if id_token_value:
+        payload["id_token"] = id_token_value
     if additional_credentials:
         payload["credentials"] = copy.deepcopy(additional_credentials)
+    logger.info(
+        "Requesting sender access token: subject_id=%s attestation=%s credential_count=%s claims=%s",
+        subject_id,
+        id_token_source or ("credentials" if additional_credentials else "none"),
+        len(additional_credentials or []),
+        _dezi_claim_presence(_jwt_segment_payload(id_token_value)) if id_token_value else {},
+    )
     try:
         response = await app.state.http_client.post(
             request_url,
@@ -1976,7 +2169,9 @@ async def reset_tasks(request: Request) -> dict[str, Any]:
 async def ui_pull_task(task_id: str, request: Request) -> dict[str, Any]:
     _require_portal_basic_auth(request)
     session, _created = _load_session(request, create=False)
-    if session is None or not str(session.dezi_id_token or "").strip():
+    if session is None or (
+        not str(session.dezi_id_token or "").strip() and not str(session.dezi_userinfo_jwt or "").strip()
+    ):
         _raise_http(401, "dezi_login_required", "Log eerst in via DEZI voordat je sender data kunt ophalen.")
     stored = app.state.task_store.get(task_id)
     if stored is None:

@@ -479,6 +479,10 @@
             <input type="text" id="bgz-receiver-base" name="bgz-receiver-base" autocomplete="off" maxlength="256" readonly>
         </div>
         <div class="form-group">
+            <label for="bgz-oauth-endpoint">Nuts-OAuth endpoint</label>
+            <input type="text" id="bgz-oauth-endpoint" name="bgz-oauth-endpoint" autocomplete="off" maxlength="256" readonly>
+        </div>
+        <div class="form-group">
             <label for="bgz-receiver-ura">Receiver URA</label>
             <input type="text" id="bgz-receiver-ura" name="bgz-receiver-ura" autocomplete="off" maxlength="64" readonly>
         </div>
@@ -503,6 +507,14 @@
     <div class="actions">
         <button type="button" id="btn-bgz-notify" disabled>Verzend verwijzing</button>
         <span class="status-line" id="bgz-status"></span>
+    </div>
+
+    <div class="form-row">
+        <div class="form-group">
+            <label for="bgz-workflow-task-id">Aangemaakte workflow task id</label>
+            <input type="text" id="bgz-workflow-task-id" name="bgz-workflow-task-id" autocomplete="off" maxlength="128" readonly>
+            <div class="small-text" style="padding-top:0.25rem;">Dit is de sender workflow Task die bij het versturen is aangemaakt of bijgewerkt.</div>
+        </div>
     </div>
 
     <details id="debug-panel" style="margin-top:0.6rem; display:none;">
@@ -550,7 +562,9 @@
     let selectedOrg = null;      // { id, name, ura }
     let selectedUnit = null;     // { resourceType, id, name }
     let selectedEndpoint = null; // { address, base, endpoint_id, source, decision, decision_explanation, ready_to_send, receiver_probe }
+    let selectedOAuthEndpoint = null; // { address, endpoint_id, source }
     let lastPreflight = null;    // debug/demo: volledige preflight response
+    let lastWorkflowTaskId = "";
 
     // Pagination ('meer laden')
     let orgNextCursor = null;
@@ -801,9 +815,15 @@
 
     function clearResolvedEndpoint() {
         selectedEndpoint = null;
+        selectedOAuthEndpoint = null;
         lastPreflight = null;
+        lastWorkflowTaskId = "";
         const chosenEl = document.getElementById("bgz-chosen-endpoint");
         if (chosenEl) chosenEl.value = "";
+        const oauthEl = document.getElementById("bgz-oauth-endpoint");
+        if (oauthEl) oauthEl.value = "";
+        const workflowTaskIdEl = document.getElementById("bgz-workflow-task-id");
+        if (workflowTaskIdEl) workflowTaskIdEl.value = "";
         const hintEl = document.getElementById("bgz-endpoint-hint");
         if (hintEl) hintEl.textContent = "";
         const debugPre = document.getElementById("debug-mapping");
@@ -998,10 +1018,12 @@
         const chosenEl = document.getElementById("bgz-chosen-endpoint");
         const hintEl = document.getElementById("bgz-endpoint-hint");
         const receiverBaseEl = document.getElementById("bgz-receiver-base");
+        const oauthEndpointEl = document.getElementById("bgz-oauth-endpoint");
         const receiverUraEl = document.getElementById("bgz-receiver-ura");
         const receiverNameEl = document.getElementById("bgz-receiver-name");
         const taskOwnerEl = document.getElementById("bgz-task-owner");
         const taskLocationEl = document.getElementById("bgz-task-location");
+        const workflowTaskIdEl = document.getElementById("bgz-workflow-task-id");
         const btnNotify = document.getElementById("btn-bgz-notify");
 
         if (receiverNameEl) {
@@ -1047,9 +1069,19 @@
             receiverBaseEl.value = base || "";
         }
 
+        if (oauthEndpointEl) {
+            oauthEndpointEl.value = (selectedOAuthEndpoint && selectedOAuthEndpoint.address)
+                ? sanitize(selectedOAuthEndpoint.address)
+                : "";
+        }
+
         if (receiverUraEl) {
             const candidate = (selectedOrg && selectedOrg.ura) ? String(selectedOrg.ura).trim() : "";
             receiverUraEl.value = candidate || "";
+        }
+
+        if (workflowTaskIdEl) {
+            workflowTaskIdEl.value = sanitize(lastWorkflowTaskId || "");
         }
 
         const receiverBase = receiverBaseEl ? String(receiverBaseEl.value || "").trim() : "";
@@ -1710,8 +1742,7 @@
             receiver_org_ref: orgRef || null,
             receiver_notification_endpoint_id: null,
             check_receiver: true,
-            // Optioneel (debug/demo): laat de backend ook OAuth endpoints meenemen
-            include_oauth: !!DEBUG_INFO
+            include_oauth: true
         };
 
         fetch(url, { method: "POST", headers: headers, body: JSON.stringify(payload) })
@@ -1727,11 +1758,20 @@
                 lastPreflight = data || null;
 
                 const notification = data && data.notification ? data.notification : null;
+                const oauth = (((data || {}).mapping || {}).nuts_oauth || {}).chosen || null;
                 const address = notification && notification.address ? String(notification.address) : "";
                 const base = notification && notification.base ? String(notification.base) : "";
                 const endpointId = notification && notification.endpoint_id ? String(notification.endpoint_id) : "";
+                const oauthAddress = oauth && oauth.address ? String(oauth.address) : "";
+                const oauthEndpointId = oauth && oauth.id ? String(oauth.id) : "";
                 const supported = !!(data && data.supported);
                 const ready = !!(data && data.ready_to_send);
+
+                selectedOAuthEndpoint = oauthAddress ? {
+                    address: sanitize(oauthAddress),
+                    endpoint_id: sanitize(oauthEndpointId),
+                    source: oauth && oauth.source ? oauth.source : null
+                } : null;
 
                 if (!supported || !(base || address)) {
                     selectedEndpoint = null;
@@ -1871,6 +1911,8 @@
             bgzStatusEl.textContent = "Preflight uitvoeren...";
             bgzStatusEl.className = "status-line";
         }
+        lastWorkflowTaskId = "";
+        updateBgzActionUI();
 
         const headers = makeHeaders();
         headers["Content-Type"] = "application/json";
@@ -1880,7 +1922,7 @@
             receiver_org_ref: orgRef || null,
             receiver_notification_endpoint_id: endpointId || null,
             check_receiver: true,
-            include_oauth: !!DEBUG_INFO
+            include_oauth: true
         };
 
         fetch(preflightUrl, { method: "POST", headers: headers, body: JSON.stringify(preflightPayload) })
@@ -1902,12 +1944,20 @@
 
                 // Werk UI-state bij met de laatste resolutie uit preflight.
                 const notif = (preflight && preflight.notification) ? preflight.notification : {};
+                const oauth = (((preflight || {}).mapping || {}).nuts_oauth || {}).chosen || null;
                 selectedEndpoint = selectedEndpoint || {};
                 selectedEndpoint.address = sanitize(notif.address || selectedEndpoint.address || "");
                 selectedEndpoint.base = sanitize(notif.base || selectedEndpoint.base || "");
                 selectedEndpoint.endpoint_id = sanitize(notif.endpoint_id || selectedEndpoint.endpoint_id || "");
                 selectedEndpoint.ready_to_send = true;
                 selectedEndpoint.receiver_probe = preflight.receiver_probe || null;
+                selectedOAuthEndpoint = (oauth && oauth.address)
+                    ? {
+                        address: sanitize(oauth.address || ""),
+                        endpoint_id: sanitize(oauth.id || ""),
+                        source: oauth.source || null
+                    }
+                    : null;
 
                 updateBgzActionUI();
 
@@ -1939,9 +1989,16 @@
                 const taskId = result && result.task_id ? String(result.task_id) : "";
                 const taskStatus = result && result.task_status ? String(result.task_status) : "";
                 const groupId = result && result.group_identifier ? String(result.group_identifier) : "";
+                const workflowTaskId = result && result.workflow_task_id ? String(result.workflow_task_id) : "";
+                lastWorkflowTaskId = workflowTaskId;
+                updateBgzActionUI();
                 if (bgzStatusEl) {
                     bgzStatusEl.textContent =
-                        "Notificatie verstuurd. Task=" + taskId + " status=" + taskStatus + (groupId ? (" group=" + groupId) : "") + ".";
+                        "Notificatie verstuurd. Receiver Task=" + taskId
+                        + " status=" + taskStatus
+                        + (workflowTaskId ? (" workflow Task=" + workflowTaskId) : "")
+                        + (groupId ? (" group=" + groupId) : "")
+                        + ".";
                     bgzStatusEl.className = "status-line ok";
                 }
                 setStatus("Verzenden verwijzing gestart (Notified Pull Task verstuurd).", "ok", true);
