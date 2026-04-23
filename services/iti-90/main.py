@@ -4550,7 +4550,6 @@ class TaskBuilder:
             "valueString": str(value)
         })
 
-
     def set_get_workflow_task(self, value: bool) -> None:
         """Set input:get-workflow-task valueBoolean."""
         inputs = _ensure_list(self.task, "input")
@@ -4571,6 +4570,7 @@ class TaskBuilder:
             },
             "valueBoolean": bool(value)
         })
+
     def set_sender_bgz_base_extension(self, *, ext_url: str, base_url: str) -> None:
         if not base_url:
             return
@@ -4741,29 +4741,29 @@ class TaskBuilder:
             if rt and rt != "Location":
                 raise RuntimeError("Task.location.reference moet Location/... zijn.")
 
-    def set_based_on_reference(self, reference: str, display: str | None = None) -> None:
+    def _get_first_based_on(self) -> Dict[str, Any]:
         self.task.setdefault("basedOn", [])
         based_on_list = _ensure_list(self.task, "basedOn")
         first = _ensure_list_item(based_on_list, 0, default={})
         if not isinstance(first, dict):
             first = {}
             based_on_list[0] = first
-        first["reference"] = str(reference)
+        return first
+
+    def set_based_on_reference(self, reference: str, display: str | None = None) -> None:
+        first = self._get_first_based_on()
+        if reference:
+            first["reference"] = str(reference)
+        else:
+            first.pop("reference", None)
         if display is not None:
             first["display"] = str(display)
 
     def set_based_on_identifier(self, *, system: str, value: str) -> None:
-        self.task.setdefault("basedOn", [])
-        based_on_list = _ensure_list(self.task, "basedOn")
-        first = _ensure_list_item(based_on_list, 0, default={})
-        if not isinstance(first, dict):
-            first = {}
-            based_on_list[0] = first
+        first = self._get_first_based_on()
         identifier = _ensure_dict(first, "identifier")
         identifier["system"] = str(system)
         identifier["value"] = str(value)
-        first.pop("reference", None)
-        first.pop("display", None)
 
     def _prune_empty_containers(self, value: Any) -> Any:
         if isinstance(value, dict):
@@ -4794,8 +4794,6 @@ class TaskBuilder:
             self.task["resourceType"] = "Task"
         self.task = self._prune_empty_containers(self.task)
         return self.task
-
-
 
 
 def _keep_task_inputs(*, task: Dict[str, Any], allowed_taskparameter_codes: set[str]) -> None:
@@ -4993,6 +4991,8 @@ def _determine_task_routing(
         task_owner_ref = effective_org_ref_norm or receiver_org_ref_norm or None
         task_owner_display = effective_org_name
     return task_owner_ref, task_owner_display, task_location_ref, task_location_display
+
+
 def _build_bgz_notification_task(
     *,
     sender_ura: str,
@@ -5037,8 +5037,11 @@ def _build_bgz_notification_task(
     if not workflow_task_logical_id:
         workflow_task_logical_id = str(uuid.uuid4())
     workflow_task_id_norm = workflow_task_logical_id
+    workflow_task_reference = f"Task/{workflow_task_id_norm}"
     workflow_task_identifier_value = f"urn:uuid:{uuid.uuid4()}"
+    
     tb.set_based_on_identifier(system=TASK_IDENTIFIER_RFC3986_SYSTEM, value=workflow_task_identifier_value)
+    tb.set_based_on_reference(workflow_task_reference)
 
     # Requester: sending system (agent) and organization (onBehalfOf)
     tb.set_requester_agent(uzi_sys=sender_uzi_sys)

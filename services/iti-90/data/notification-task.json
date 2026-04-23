@@ -5,7 +5,8 @@
       "identifier": {
         "system": "urn:ietf:rfc:3986",
         "value": "DYNAMIC:workflow_task_identifier"
-      }
+      },
+      "reference": "DYNAMIC:workflow_task_id"
     }
   ],
   "status": "requested",
