@@ -105,6 +105,18 @@ def _raise_http(http_status_code: int, reason: str, message: str, **extra: Any) 
     raise HTTPException(status_code=http_status_code, detail=detail)
 
 
+def _http_exception_reason(exc: HTTPException) -> str:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        reason = str(detail.get("reason") or "").strip()
+        if reason:
+            return reason
+        message = str(detail.get("message") or "").strip()
+        if message:
+            return message
+    return str(detail or exc.status_code)
+
+
 def _portal_basic_auth_credentials() -> tuple[str, str]:
     username = str(settings.portal_basic_auth_username or "").strip()
     password = str(settings.portal_basic_auth_password or "")
@@ -803,8 +815,10 @@ class UserSession:
     dezi_logged_in_at: Optional[str] = None
     dezi_identity: dict[str, Any] = field(default_factory=dict)
     dezi_claims: dict[str, Any] = field(default_factory=dict)
+    dezi_introspection: dict[str, Any] = field(default_factory=dict)
     dezi_token_metadata: dict[str, Any] = field(default_factory=dict)
     dezi_id_token: Optional[str] = None
+    dezi_token_id: Optional[str] = None
     dezi_userinfo_jwt: Optional[str] = None
 
 
@@ -907,6 +921,17 @@ def _dezi_callback_url() -> str:
     return _join_url(public_root, callback_path)
 
 
+def _dezi_userinfo_endpoint(oidc_config: dict[str, Any]) -> str:
+    return str(oidc_config.get("userinfo_endpoint") or "").strip()
+
+
+def _dezi_introspection_endpoint(oidc_config: dict[str, Any]) -> str:
+    override = str(settings.dezi_introspection_endpoint or "").strip()
+    if override:
+        return override
+    return str(oidc_config.get("introspection_endpoint") or "").strip()
+
+
 async def _get_dezi_material() -> dict[str, Any]:
     cached = getattr(app.state, "dezi_material", None)
     if cached is not None:
@@ -971,10 +996,16 @@ async def _get_dezi_oidc_configuration() -> dict[str, Any]:
         _raise_http(502, "dezi_well_known_invalid_json", "DEZI well-known endpoint gaf geen geldige JSON terug.", error=str(exc))
     if not isinstance(payload, dict):
         _raise_http(502, "dezi_well_known_invalid_json", "DEZI well-known endpoint gaf geen JSON object terug.")
-    required_fields = ("authorization_endpoint", "token_endpoint", "userinfo_endpoint", "jwks_uri")
+    required_fields = ("authorization_endpoint", "token_endpoint", "jwks_uri")
     missing = [field for field in required_fields if not str(payload.get(field) or "").strip()]
     if missing:
         _raise_http(502, "dezi_well_known_incomplete", "DEZI well-known configuratie mist verplichte velden.", missing_fields=missing)
+    if not _dezi_userinfo_endpoint(payload) and not _dezi_introspection_endpoint(payload):
+        _raise_http(
+            502,
+            "dezi_well_known_incomplete",
+            "DEZI well-known configuratie mist zowel userinfo als introspection endpoint.",
+        )
 
     app.state.dezi_oidc_configuration = payload
     app.state.dezi_oidc_configuration_fetched_at = time.time()
@@ -1083,7 +1114,7 @@ async def _exchange_dezi_code(*, oidc_config: dict[str, Any], code: str, code_ve
 
 
 async def _fetch_dezi_userinfo(*, oidc_config: dict[str, Any], access_token: str) -> str:
-    userinfo_endpoint = str(oidc_config.get("userinfo_endpoint") or "").strip()
+    userinfo_endpoint = _dezi_userinfo_endpoint(oidc_config)
     if not userinfo_endpoint:
         _raise_http(502, "dezi_well_known_incomplete", "DEZI userinfo endpoint ontbreekt in de configuratie.")
     try:
@@ -1110,6 +1141,45 @@ async def _fetch_dezi_userinfo(*, oidc_config: dict[str, Any], access_token: str
     if not raw:
         _raise_http(502, "dezi_userinfo_empty", "DEZI userinfo gaf een lege response terug.")
     return raw
+
+
+async def _fetch_dezi_access_token_introspection(*, oidc_config: dict[str, Any], access_token: str) -> dict[str, Any]:
+    introspection_endpoint = _dezi_introspection_endpoint(oidc_config)
+    if not introspection_endpoint:
+        return {}
+    client_assertion = await _build_private_key_jwt(introspection_endpoint, oidc_config)
+    data = {
+        "token": access_token,
+        "token_type_hint": "access_token",
+        "client_id": _dezi_client_id(),
+        "client_assertion_type": OIDC_CLIENT_ASSERTION_TYPE,
+        "client_assertion": client_assertion,
+    }
+    try:
+        response = await app.state.dezi_client.post(
+            introspection_endpoint,
+            data=data,
+            headers={"Accept": "application/json"},
+            timeout=settings.dezi_timeout,
+        )
+    except httpx.HTTPError as exc:
+        logger.exception("DEZI introspection request failed")
+        _raise_http(502, "dezi_introspection_failed", "DEZI introspectie ophalen faalde.", error=str(exc))
+    if response.status_code >= 400:
+        _raise_http(
+            502,
+            "dezi_introspection_failed",
+            "DEZI introspectie ophalen faalde.",
+            status_code=response.status_code,
+            upstream_body=response.text[:1000],
+        )
+    try:
+        payload = response.json()
+    except Exception as exc:
+        _raise_http(502, "dezi_introspection_invalid_json", "DEZI introspectie gaf geen geldige JSON terug.", error=str(exc))
+    if not isinstance(payload, dict):
+        _raise_http(502, "dezi_introspection_invalid_json", "DEZI introspectie gaf geen JSON object terug.")
+    return payload
 
 
 def _validate_token_claims(claims: dict[str, Any], *, issuer: str | None, audience: str | None, nonce: str | None = None) -> None:
@@ -1158,18 +1228,18 @@ async def _verify_signed_jwt(token: str, *, oidc_config: dict[str, Any], nonce: 
     return claims
 
 
-async def _decrypt_dezi_userinfo(raw_userinfo: str, *, oidc_config: dict[str, Any]) -> tuple[Optional[str], dict[str, Any]]:
-    stripped = str(raw_userinfo or "").strip()
+async def _decode_dezi_payload(raw_payload: str, *, oidc_config: dict[str, Any]) -> tuple[Optional[str], dict[str, Any]]:
+    stripped = str(raw_payload or "").strip()
     if not stripped:
-        _raise_http(502, "dezi_userinfo_empty", "DEZI userinfo is leeg.")
+        _raise_http(502, "dezi_payload_empty", "DEZI payload is leeg.")
 
     if stripped.startswith("{"):
         try:
             payload = json.loads(stripped)
         except Exception as exc:
-            _raise_http(502, "dezi_userinfo_invalid_json", "DEZI userinfo JSON kon niet worden geparseerd.", error=str(exc))
+            _raise_http(502, "dezi_payload_invalid_json", "DEZI payload JSON kon niet worden geparseerd.", error=str(exc))
         if not isinstance(payload, dict):
-            _raise_http(502, "dezi_userinfo_invalid_json", "DEZI userinfo JSON is geen object.")
+            _raise_http(502, "dezi_payload_invalid_json", "DEZI payload JSON is geen object.")
         return None, payload
 
     if stripped.count(".") == 4:
@@ -1179,7 +1249,7 @@ async def _decrypt_dezi_userinfo(raw_userinfo: str, *, oidc_config: dict[str, An
             envelope.deserialize(stripped)
             envelope.decrypt(material["private_jwk"])
         except Exception as exc:
-            _raise_http(502, "dezi_userinfo_decrypt_failed", "DEZI userinfo decryptie faalde.", error=str(exc))
+            _raise_http(502, "dezi_payload_decrypt_failed", "DEZI payload decryptie faalde.", error=str(exc))
         inner = envelope.payload.decode("utf-8")
     else:
         inner = stripped
@@ -1191,10 +1261,28 @@ async def _decrypt_dezi_userinfo(raw_userinfo: str, *, oidc_config: dict[str, An
     try:
         payload = json.loads(inner)
     except Exception as exc:
-        _raise_http(502, "dezi_userinfo_invalid_json", "DEZI userinfo kon niet worden geparseerd.", error=str(exc))
+        _raise_http(502, "dezi_payload_invalid_json", "DEZI payload kon niet worden geparseerd.", error=str(exc))
     if not isinstance(payload, dict):
-        _raise_http(502, "dezi_userinfo_invalid_json", "DEZI userinfo payload is geen object.")
+        _raise_http(502, "dezi_payload_invalid_json", "DEZI payload is geen object.")
     return None, payload
+
+
+async def _decrypt_dezi_userinfo(raw_userinfo: str, *, oidc_config: dict[str, Any]) -> tuple[Optional[str], dict[str, Any]]:
+    stripped = str(raw_userinfo or "").strip()
+    if not stripped:
+        _raise_http(502, "dezi_userinfo_empty", "DEZI userinfo is leeg.")
+    try:
+        return await _decode_dezi_payload(stripped, oidc_config=oidc_config)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        reason = str(detail.get("reason") or "").strip()
+        if reason == "dezi_payload_invalid_json":
+            _raise_http(502, "dezi_userinfo_invalid_json", "DEZI userinfo kon niet worden geparseerd.", error=detail.get("error"))
+        if reason == "dezi_payload_decrypt_failed":
+            _raise_http(502, "dezi_userinfo_decrypt_failed", "DEZI userinfo decryptie faalde.", error=detail.get("error"))
+        if reason == "dezi_payload_empty":
+            _raise_http(502, "dezi_userinfo_empty", "DEZI userinfo is leeg.")
+        raise
 
 
 def _dezi_roles_from_claims(claims: dict[str, Any]) -> list[str]:
@@ -1254,6 +1342,43 @@ def _dezi_identity_from_claims(claims: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pick_dezi_claims(primary_claims: dict[str, Any], fallback_claims: dict[str, Any]) -> dict[str, Any]:
+    primary_identity = _dezi_identity_from_claims(primary_claims) if isinstance(primary_claims, dict) else {}
+    if primary_identity.get("employee_identifier"):
+        return primary_claims
+    fallback_identity = _dezi_identity_from_claims(fallback_claims) if isinstance(fallback_claims, dict) else {}
+    if fallback_identity.get("employee_identifier"):
+        return fallback_claims
+    return primary_claims if isinstance(primary_claims, dict) and primary_claims else fallback_claims
+
+
+def _extract_dezi_statement_from_introspection(payload: dict[str, Any]) -> str:
+    value = _first_non_empty(
+        payload,
+        ("verklaring",),
+        ("claims", "verklaring"),
+        ("subject", "properties", "verklaring"),
+        ("token_id",),
+        ("claims", "token_id"),
+        ("subject", "properties", "token_id"),
+        ("id_token",),
+        ("claims", "id_token"),
+    )
+    return str(value or "").strip()
+
+
+async def _dezi_token_id_from_introspection(
+    introspection_payload: dict[str, Any],
+    *,
+    oidc_config: dict[str, Any],
+) -> tuple[Optional[str], dict[str, Any]]:
+    statement = _extract_dezi_statement_from_introspection(introspection_payload)
+    if not statement:
+        return None, {}
+    token_id, claims = await _decode_dezi_payload(statement, oidc_config=oidc_config)
+    return (token_id or statement), claims
+
+
 def _session_token_metadata(token_payload: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in ("token_type", "scope", "expires_in", "refresh_expires_in"):
@@ -1279,11 +1404,35 @@ async def _perform_dezi_login(session: UserSession, *, code: str) -> UserSession
         code=code,
         code_verifier=str(session.pending_code_verifier or ""),
     )
-    userinfo_raw = await _fetch_dezi_userinfo(oidc_config=oidc_config, access_token=str(token_payload.get("access_token") or ""))
-    userinfo_jwt, userinfo_claims = await _decrypt_dezi_userinfo(userinfo_raw, oidc_config=oidc_config)
+    dezi_access_token = str(token_payload.get("access_token") or "").strip()
+
+    userinfo_jwt: Optional[str] = None
+    userinfo_claims: dict[str, Any] = {}
+    if _dezi_userinfo_endpoint(oidc_config):
+        userinfo_raw = await _fetch_dezi_userinfo(oidc_config=oidc_config, access_token=dezi_access_token)
+        userinfo_jwt, userinfo_claims = await _decrypt_dezi_userinfo(userinfo_raw, oidc_config=oidc_config)
+
+    introspection_payload: dict[str, Any] = {}
+    token_id: Optional[str] = None
+    introspection_claims: dict[str, Any] = {}
+    introspection_error: Optional[str] = None
+    if _dezi_introspection_endpoint(oidc_config):
+        try:
+            introspection_payload = await _fetch_dezi_access_token_introspection(
+                oidc_config=oidc_config,
+                access_token=dezi_access_token,
+            )
+            token_id, introspection_claims = await _dezi_token_id_from_introspection(
+                introspection_payload,
+                oidc_config=oidc_config,
+            )
+        except HTTPException as exc:
+            introspection_error = _http_exception_reason(exc)
+            logger.warning("DEZI introspection fallback unavailable: %s", introspection_error)
 
     session.dezi_id_token = _choose_dezi_id_token(token_payload, userinfo_jwt)
-    if not session.dezi_id_token:
+    session.dezi_token_id = token_id
+    if not session.dezi_id_token and not session.dezi_token_id:
         _raise_http(502, "dezi_id_token_missing", "DEZI login leverde geen bruikbare id_token op.")
 
     if str(token_payload.get("id_token") or "").strip():
@@ -1305,9 +1454,17 @@ async def _perform_dezi_login(session: UserSession, *, code: str) -> UserSession
                 _dezi_identity_from_claims(userinfo_claims),
             )
 
+    selected_claims = _pick_dezi_claims(userinfo_claims, introspection_claims)
     session.dezi_logged_in_at = _now_iso()
-    session.dezi_identity = _dezi_identity_from_claims(userinfo_claims)
-    session.dezi_claims = copy.deepcopy(userinfo_claims)
+    session.dezi_identity = _dezi_identity_from_claims(selected_claims)
+    session.dezi_claims = copy.deepcopy(selected_claims)
+    session.dezi_introspection = {
+        "endpoint": _dezi_introspection_endpoint(oidc_config) or None,
+        "payload": copy.deepcopy(introspection_payload),
+        "token_id": token_id,
+        "claims": copy.deepcopy(introspection_claims),
+        "error": introspection_error,
+    }
     session.dezi_token_metadata = _session_token_metadata(token_payload)
     session.dezi_userinfo_jwt = userinfo_jwt
     session.pending_state = None
@@ -1634,6 +1791,9 @@ async def _issue_sender_additional_credentials(*, subject_id: str, credentials: 
 
 
 def _sender_attestation_inputs(session: UserSession) -> tuple[str, Optional[str], list[dict[str, Any]]]:
+    dezi_token_id = str(session.dezi_token_id or "").strip() or None
+    if dezi_token_id:
+        return "token_id", dezi_token_id, []
     dezi_userinfo_jwt = str(session.dezi_userinfo_jwt or "").strip() or None
     if dezi_userinfo_jwt:
         mapped_id_token = _mapped_dezi_id_token_from_userinfo_jwt(dezi_userinfo_jwt)
@@ -1793,8 +1953,68 @@ async def _fetch_sender_path(
     return result
 
 
+async def _put_sender_task_status(
+    sender_bgz_base: str,
+    sender_access_token: str,
+    workflow_task_id: str,
+    *,
+    status: str,
+    authorization_base: str | None = None,
+) -> dict[str, Any]:
+    task_id = str(workflow_task_id or "").strip()
+    if not task_id:
+        _raise_http(400, "workflow_task_reference_missing", "Geen workflow task id beschikbaar voor sender status update.")
+    next_status = str(status or "").strip().lower()
+    if not next_status:
+        _raise_http(400, "workflow_task_status_missing", "Geen workflow task status opgegeven voor sender status update.")
+
+    url = _join_url(sender_bgz_base, f"Task/{quote(task_id, safe='')}")
+    payload = {"resourceType": "Task", "id": task_id, "status": next_status}
+    headers = {
+        "Accept": "application/fhir+json, application/json",
+        "Authorization": f"Bearer {sender_access_token}",
+        "Content-Type": "application/fhir+json",
+    }
+    auth_base = str(authorization_base or "").strip()
+    if auth_base:
+        headers[SENDER_AUTHORIZATION_BASE_HEADER] = auth_base
+    try:
+        response = await app.state.http_client.put(
+            url,
+            json=payload,
+            headers=headers,
+        )
+    except httpx.HTTPError as exc:
+        return {
+            "ok": False,
+            "url": url,
+            "request_body": payload,
+            "error": str(exc),
+        }
+
+    result: dict[str, Any] = {
+        "ok": response.status_code < 400,
+        "url": url,
+        "request_body": payload,
+        "status_code": response.status_code,
+        "content_type": str(response.headers.get("content-type") or "").strip() or None,
+    }
+    if _is_json_content_type(response.headers.get("content-type") or ""):
+        try:
+            result["body"] = response.json()
+            return result
+        except Exception:
+            pass
+    result["body"] = response.text[:4000]
+    return result
+
+
 async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> dict[str, Any]:
-    if not str(session.dezi_id_token or "").strip() and not str(session.dezi_userinfo_jwt or "").strip():
+    if (
+        not str(session.dezi_id_token or "").strip()
+        and not str(session.dezi_token_id or "").strip()
+        and not str(session.dezi_userinfo_jwt or "").strip()
+    ):
         _raise_http(401, "dezi_login_required", "Log eerst in via DEZI voordat je sender data kunt ophalen.")
     if not str(((session.dezi_identity or {}).get("employee_identifier")) or "").strip():
         _raise_http(401, "dezi_login_required", "DEZI sessie mist employee_identifier voor de sender tokenaanvraag.")
@@ -1905,6 +2125,125 @@ async def _pull_sender_data(*, task: dict[str, Any], session: UserSession) -> di
     }
 
 
+async def _complete_sender_task(*, task: dict[str, Any]) -> dict[str, Any]:
+    sender_ura = _extract_task_sender_ura(task)
+    sender_base_from_task = _extract_sender_bgz_base(task)
+    workflow_task_ref = _extract_workflow_task_ref(task)
+    workflow_task_identifier_system, workflow_task_identifier_value = _extract_workflow_task_identifier(task)
+    authorization_base = str(_extract_task_input_value(task, "authorization-base") or "").strip()
+
+    discovery = await _discover_sender_endpoints(str(sender_ura or ""))
+    sender_oauth_endpoint = str(((discovery.get("oauth_endpoint") or {}).get("address")) or "").strip()
+    if not sender_oauth_endpoint:
+        _raise_http(404, "sender_oauth_endpoint_missing", "Geen Nuts-OAuth endpoint gevonden voor de sender in de directory.", sender_ura=sender_ura)
+    sender_auth_server_url = _sender_authorization_server_url(sender_oauth_endpoint, str(sender_ura or ""))
+
+    discovered_bgz_base = str(((discovery.get("bgz_endpoint") or {}).get("address")) or "").strip() or None
+    sender_bgz_base = str(discovered_bgz_base or "").strip() or str(sender_base_from_task or "").strip()
+    if not sender_bgz_base:
+        _raise_http(404, "sender_bgz_base_missing", "Geen sender BgZ endpoint gevonden in de notification Task of directory.", sender_ura=sender_ura)
+
+    token_payload = await _request_sender_access_token(
+        task=task,
+        sender_oauth_endpoint=sender_auth_server_url,
+    )
+    sender_access_token = str(token_payload.get("access_token") or "").strip()
+    introspection = await _introspect_access_token_payload(sender_access_token)
+    token_summary = _sender_access_token_summary(token_payload, introspection, "none")
+
+    workflow_task_id = ""
+    workflow_task_lookup_path = ""
+    workflow_task_lookup: dict[str, Any] | None = None
+    if workflow_task_ref:
+        _resource_type, workflow_task_id = _split_ref(workflow_task_ref)
+    elif workflow_task_identifier_system and workflow_task_identifier_value:
+        workflow_task_lookup_path = _workflow_task_search_path(workflow_task_identifier_system, workflow_task_identifier_value)
+        workflow_task_lookup = await _fetch_sender_path(
+            sender_bgz_base,
+            sender_access_token,
+            workflow_task_lookup_path,
+            authorization_base=authorization_base,
+        )
+        workflow_task_resource = _extract_workflow_task_resource(workflow_task_lookup.get("body"))
+        if not workflow_task_lookup.get("ok"):
+            _raise_http(
+                502,
+                "workflow_task_fetch_failed",
+                "Het ophalen van de workflow task bij de sender is mislukt.",
+                workflow_task_pull=workflow_task_lookup,
+            )
+        if workflow_task_resource is None:
+            _raise_http(
+                502,
+                "workflow_task_invalid",
+                "De sender gaf geen geldige workflow task terug voor de geautoriseerde pull.",
+                workflow_task_pull=workflow_task_lookup,
+            )
+        workflow_task_id = str(workflow_task_resource.get("id") or "").strip()
+        if not workflow_task_id:
+            _raise_http(
+                502,
+                "workflow_task_invalid",
+                "De sender workflow task mist een id voor de status update.",
+                workflow_task_pull=workflow_task_lookup,
+            )
+    if not workflow_task_id:
+        _raise_http(
+            400,
+            "workflow_task_reference_missing",
+            "Notification Task bevat geen workflow task referentie of identifier voor de sender update.",
+        )
+
+    task_update = await _put_sender_task_status(
+        sender_bgz_base,
+        sender_access_token,
+        workflow_task_id,
+        status="completed",
+        authorization_base=authorization_base,
+    )
+    if not task_update.get("ok"):
+        _raise_http(
+            502,
+            "workflow_task_update_failed",
+            "Het bijwerken van de workflow task bij de sender is mislukt.",
+            task_update=task_update,
+        )
+
+    sender_summary: dict[str, Any] = {
+        "sender_ura": sender_ura,
+        "authorization_base": authorization_base or None,
+        "sender_bgz_base": sender_bgz_base,
+        "sender_bgz_base_from_task": sender_base_from_task,
+        "sender_bgz_base_from_directory": discovered_bgz_base,
+        "sender_oauth_endpoint": sender_oauth_endpoint,
+        "workflow_task_ref": workflow_task_ref,
+        "workflow_task_identifier_system": workflow_task_identifier_system,
+        "workflow_task_identifier_value": workflow_task_identifier_value,
+        "workflow_task_id": workflow_task_id or None,
+    }
+    if workflow_task_lookup_path:
+        sender_summary["workflow_task_lookup_path"] = workflow_task_lookup_path
+
+    response_body: dict[str, Any] = {
+        "task_id": str(task.get("id") or "").strip(),
+        "notification_summary": _task_summary(task, received_at=""),
+        "sender": sender_summary,
+        "sender_access_token": {
+            "token_type": token_payload.get("token_type"),
+            "scope": token_payload.get("scope"),
+            "expires_in": token_payload.get("expires_in"),
+            "received": True,
+            "attestation_source": "none",
+            "selected_introspection": token_summary,
+            "candidate_evaluation": [token_summary],
+        },
+        "task_update": task_update,
+    }
+    if workflow_task_lookup is not None:
+        response_body["workflow_task_lookup"] = workflow_task_lookup
+    return response_body
+
+
 def _portal_state(request: Request) -> dict[str, Any]:
     session, _ = _load_session(request, create=False)
     tasks = app.state.task_store.list()
@@ -1916,12 +2255,21 @@ def _portal_state(request: Request) -> dict[str, Any]:
             "dezi_callback_url": _dezi_callback_url(),
         },
         "dezi": {
-            "logged_in": bool(session and str(session.dezi_id_token or "").strip()),
+            "logged_in": bool(
+                session
+                and (
+                    str(session.dezi_id_token or "").strip()
+                    or str(session.dezi_token_id or "").strip()
+                    or str(session.dezi_userinfo_jwt or "").strip()
+                )
+            ),
             "logged_in_at": (session.dezi_logged_in_at if session else None),
             "identity": copy.deepcopy(session.dezi_identity) if session else {},
             "claims": copy.deepcopy(session.dezi_claims) if session else {},
+            "introspection": copy.deepcopy(session.dezi_introspection) if session else {},
             "token_metadata": copy.deepcopy(session.dezi_token_metadata) if session else {},
             "id_token": (str(session.dezi_id_token or "").strip() if session else None) or None,
+            "token_id": (str(session.dezi_token_id or "").strip() if session else None) or None,
             "userinfo_jwt": (str(session.dezi_userinfo_jwt or "").strip() if session else None) or None,
         },
         "tasks": [
@@ -2170,13 +2518,24 @@ async def ui_pull_task(task_id: str, request: Request) -> dict[str, Any]:
     _require_portal_basic_auth(request)
     session, _created = _load_session(request, create=False)
     if session is None or (
-        not str(session.dezi_id_token or "").strip() and not str(session.dezi_userinfo_jwt or "").strip()
+        not str(session.dezi_id_token or "").strip()
+        and not str(session.dezi_token_id or "").strip()
+        and not str(session.dezi_userinfo_jwt or "").strip()
     ):
         _raise_http(401, "dezi_login_required", "Log eerst in via DEZI voordat je sender data kunt ophalen.")
     stored = app.state.task_store.get(task_id)
     if stored is None:
         raise HTTPException(status_code=404, detail="Task niet gevonden.")
     return await _pull_sender_data(task=stored.resource, session=session)
+
+
+@app.post("/ui/tasks/{task_id}/complete")
+async def ui_complete_task(task_id: str, request: Request) -> dict[str, Any]:
+    _require_portal_basic_auth(request)
+    stored = app.state.task_store.get(task_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Task niet gevonden.")
+    return await _complete_sender_task(task=stored.resource)
 
 
 if __name__ == "__main__":

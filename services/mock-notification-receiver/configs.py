@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     dezi_timeout: float = Field(20.0, validation_alias="MOCK_RECEIVER_DEZI_TIMEOUT")
     dezi_verify_tls: bool = Field(True, validation_alias="MOCK_RECEIVER_DEZI_VERIFY_TLS")
     dezi_ca_certs_file: Optional[str] = Field(None, validation_alias="MOCK_RECEIVER_DEZI_CA_CERTS_FILE")
+    dezi_introspection_endpoint: Optional[str] = Field(
+        None,
+        validation_alias="MOCK_RECEIVER_DEZI_INTROSPECTION_ENDPOINT",
+    )
     dezi_client_assertion_audience: Optional[str] = Field(
         None,
         validation_alias="MOCK_RECEIVER_DEZI_CLIENT_ASSERTION_AUDIENCE",

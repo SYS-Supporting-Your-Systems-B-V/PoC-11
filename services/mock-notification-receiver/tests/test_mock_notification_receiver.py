@@ -395,6 +395,7 @@ def test_ui_state_includes_dezi_claims_and_tokens_when_logged_in(monkeypatch):
         session = appmod.app.state.session_store.create()
         session.dezi_logged_in_at = "2026-03-31T15:00:00Z"
         session.dezi_id_token = "dezi-id-token"
+        session.dezi_token_id = "dezi-token-id"
         session.dezi_userinfo_jwt = "dezi-userinfo-jwt"
         session.dezi_identity = {
             "display_name": "Dr. Demo",
@@ -403,6 +404,7 @@ def test_ui_state_includes_dezi_claims_and_tokens_when_logged_in(monkeypatch):
             "roles": ["01.041"],
         }
         session.dezi_claims = {"sub": "demo-sub", "relations": [{"ura": "87654321", "roles": ["01.041"]}]}
+        session.dezi_introspection = {"endpoint": "https://dezi.example/introspect", "payload": {"active": True}}
         session.dezi_token_metadata = {"scope": "openid"}
         appmod.app.state.session_store.save(session)
         client.cookies.set(appmod.settings.session_cookie_name, session.session_id)
@@ -413,8 +415,10 @@ def test_ui_state_includes_dezi_claims_and_tokens_when_logged_in(monkeypatch):
     body = response.json()
     assert body["dezi"]["logged_in"] is True
     assert body["dezi"]["id_token"] == "dezi-id-token"
+    assert body["dezi"]["token_id"] == "dezi-token-id"
     assert body["dezi"]["userinfo_jwt"] == "dezi-userinfo-jwt"
     assert body["dezi"]["claims"]["sub"] == "demo-sub"
+    assert body["dezi"]["introspection"]["endpoint"] == "https://dezi.example/introspect"
 
 
 def test_dezi_client_follows_redirects():
@@ -549,6 +553,84 @@ def test_sender_attestation_inputs_prefers_userinfo_jwt_over_id_token():
     assert source == "userinfo_jwt"
     assert id_token == "signed-dezi-userinfo-jwt"
     assert credentials == []
+
+
+def test_sender_attestation_inputs_prefers_token_id_over_userinfo_jwt_and_id_token():
+    appmod = _import_app_module()
+
+    session = appmod.UserSession(session_id="sess-1", created_at="2026-04-21T15:21:31Z")
+    session.dezi_id_token = "raw-oidc-id-token"
+    session.dezi_userinfo_jwt = "signed-dezi-userinfo-jwt"
+    session.dezi_token_id = "signed-dezi-token-id"
+
+    source, id_token, credentials = appmod._sender_attestation_inputs(session)
+
+    assert source == "token_id"
+    assert id_token == "signed-dezi-token-id"
+    assert credentials == []
+
+
+def test_perform_dezi_login_accepts_introspection_statement_without_userinfo(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    async def _fake_oidc_config():
+        return {
+            "authorization_endpoint": "https://dezi.example/authorize",
+            "token_endpoint": "https://dezi.example/token",
+            "introspection_endpoint": "https://dezi.example/introspect",
+            "jwks_uri": "https://dezi.example/jwks",
+            "issuer": "https://dezi.example",
+        }
+
+    async def _fake_exchange_dezi_code(*, oidc_config, code: str, code_verifier: str):
+        assert oidc_config["introspection_endpoint"] == "https://dezi.example/introspect"
+        assert code == "auth-code-123"
+        assert code_verifier == "verifier-123"
+        return {"access_token": "dezi-access-token", "scope": "openid"}
+
+    async def _fake_fetch_dezi_access_token_introspection(*, oidc_config, access_token: str):
+        assert oidc_config["introspection_endpoint"] == "https://dezi.example/introspect"
+        assert access_token == "dezi-access-token"
+        return {"verklaring": "signed-dezi-token-id", "active": True}
+
+    async def _fake_dezi_token_id_from_introspection(introspection_payload, *, oidc_config):
+        assert introspection_payload["verklaring"] == "signed-dezi-token-id"
+        assert oidc_config["issuer"] == "https://dezi.example"
+        return (
+            "signed-dezi-token-id",
+            {
+                "initials": "R.M.A.",
+                "surname": "Laar",
+                "surname_prefix": "van",
+                "uzi_id": "999991772",
+                "relations": [
+                    {
+                        "entity_name": "De Ziekenboeg",
+                        "roles": ["01.010"],
+                        "ura": "87654321",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(appmod, "_get_dezi_oidc_configuration", _fake_oidc_config)
+    monkeypatch.setattr(appmod, "_exchange_dezi_code", _fake_exchange_dezi_code)
+    monkeypatch.setattr(appmod, "_fetch_dezi_access_token_introspection", _fake_fetch_dezi_access_token_introspection)
+    monkeypatch.setattr(appmod, "_dezi_token_id_from_introspection", _fake_dezi_token_id_from_introspection)
+
+    session = appmod.UserSession(session_id="sess-1", created_at="2026-04-21T15:21:31Z")
+    session.pending_code_verifier = "verifier-123"
+
+    updated = asyncio.run(appmod._perform_dezi_login(session, code="auth-code-123"))
+
+    assert updated.dezi_id_token is None
+    assert updated.dezi_token_id == "signed-dezi-token-id"
+    assert updated.dezi_claims["uzi_id"] == "999991772"
+    assert updated.dezi_identity["employee_identifier"] == "999991772"
+    assert updated.dezi_identity["organization_ura"] == "87654321"
+    assert updated.dezi_introspection["endpoint"] == "https://dezi.example/introspect"
+    assert updated.dezi_introspection["payload"]["verklaring"] == "signed-dezi-token-id"
 
 
 def test_sender_attestation_inputs_maps_frontend_dezi_claims_for_project_gf():
@@ -1091,5 +1173,159 @@ def test_ui_pull_uses_dezi_session_and_returns_sender_data(monkeypatch):
                 "roles": ["01.041"],
             },
             "sender_oauth_endpoint": "https://sender.example/nuts-oauth2/oauth2/12345678",
+        }
+    ]
+
+
+def test_ui_complete_updates_sender_task_without_dezi_login(monkeypatch):
+    appmod = _import_app_module()
+    _set_settings(monkeypatch, appmod)
+
+    sender_token_calls = []
+    workflow_lookup_calls = []
+    sender_update_calls = []
+
+    async def _fake_discover_sender_endpoints(_sender_ura: str):
+        return {
+            "organization": {"resourceType": "Organization", "id": "org-sender"},
+            "oauth_endpoint": {"address": "https://sender.example/nuts-oauth2"},
+            "bgz_endpoint": {"address": "https://sender.example/notifiedpull/fhir"},
+        }
+
+    async def _fake_request_sender_access_token(
+        *,
+        task,
+        sender_oauth_endpoint: str,
+        id_token=None,
+        id_token_source=None,
+        additional_credentials=None,
+    ):
+        sender_token_calls.append(
+            {
+                "task_id": task["id"],
+                "sender_oauth_endpoint": sender_oauth_endpoint,
+                "id_token": id_token,
+                "id_token_source": id_token_source,
+                "additional_credentials": additional_credentials,
+            }
+        )
+        return {
+            "access_token": "sender-status-token",
+            "token_type": "Bearer",
+            "scope": "bgz-sender",
+            "expires_in": 900,
+        }
+
+    async def _fake_introspect_access_token_payload(token: str):
+        assert token == "sender-status-token"
+        return {
+            "active": True,
+            "organization_ura": "87654321",
+            "scope": "bgz-sender",
+        }
+
+    async def _fake_fetch_sender_path(
+        sender_bgz_base: str,
+        sender_access_token: str,
+        relative_path: str,
+        *,
+        authorization_base: str | None = None,
+    ):
+        workflow_lookup_calls.append(
+            {
+                "sender_bgz_base": sender_bgz_base,
+                "sender_access_token": sender_access_token,
+                "relative_path": relative_path,
+                "authorization_base": authorization_base,
+            }
+        )
+        return {
+            "ok": True,
+            "url": f"{sender_bgz_base.rstrip('/')}/{relative_path}",
+            "status_code": 200,
+            "content_type": "application/fhir+json",
+            "body": {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "total": 1,
+                "entry": [{"resource": {"resourceType": "Task", "id": "wf-1", "status": "requested"}}],
+            },
+        }
+
+    async def _fake_put_sender_task_status(
+        sender_bgz_base: str,
+        sender_access_token: str,
+        workflow_task_id: str,
+        *,
+        status: str,
+        authorization_base: str | None = None,
+    ):
+        sender_update_calls.append(
+            {
+                "sender_bgz_base": sender_bgz_base,
+                "sender_access_token": sender_access_token,
+                "workflow_task_id": workflow_task_id,
+                "status": status,
+                "authorization_base": authorization_base,
+            }
+        )
+        return {
+            "ok": True,
+            "url": f"{sender_bgz_base.rstrip('/')}/Task/{workflow_task_id}",
+            "status_code": 200,
+            "content_type": "application/fhir+json",
+            "request_body": {"resourceType": "Task", "id": workflow_task_id, "status": status},
+            "body": {"resourceType": "Task", "id": workflow_task_id, "status": status},
+        }
+
+    monkeypatch.setattr(appmod, "_discover_sender_endpoints", _fake_discover_sender_endpoints)
+    monkeypatch.setattr(appmod, "_request_sender_access_token", _fake_request_sender_access_token)
+    monkeypatch.setattr(appmod, "_introspect_access_token_payload", _fake_introspect_access_token_payload)
+    monkeypatch.setattr(appmod, "_fetch_sender_path", _fake_fetch_sender_path)
+    monkeypatch.setattr(appmod, "_put_sender_task_status", _fake_put_sender_task_status)
+
+    with TestClient(appmod.app) as client:
+        client.delete("/debug/tasks")
+        task = _task_payload()
+        task["id"] = "notif-1"
+        stored = appmod.app.state.task_store.save(task)
+
+        response = client.post(f"/ui/tasks/{stored.resource['id']}/complete")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["notification_summary"]["id"] == "notif-1"
+    assert body["sender"]["sender_oauth_endpoint"] == "https://sender.example/nuts-oauth2"
+    assert body["sender"]["sender_bgz_base"] == "https://sender.example/notifiedpull/fhir"
+    assert body["sender"]["workflow_task_id"] == "wf-1"
+    assert body["sender"]["workflow_task_lookup_path"] == "Task?identifier=urn%3Aietf%3Arfc%3A3986%7Curn%3Auuid%3A11111111-1111-1111-1111-111111111111"
+    assert body["sender_access_token"]["received"] is True
+    assert body["sender_access_token"]["attestation_source"] == "none"
+    assert body["sender_access_token"]["selected_introspection"]["organization_ura"] == "87654321"
+    assert body["task_update"]["body"]["status"] == "completed"
+    assert sender_token_calls == [
+        {
+            "task_id": "notif-1",
+            "sender_oauth_endpoint": "https://sender.example/nuts-oauth2/oauth2/12345678",
+            "id_token": None,
+            "id_token_source": None,
+            "additional_credentials": None,
+        }
+    ]
+    assert workflow_lookup_calls == [
+        {
+            "sender_bgz_base": "https://sender.example/notifiedpull/fhir",
+            "sender_access_token": "sender-status-token",
+            "relative_path": "Task?identifier=urn%3Aietf%3Arfc%3A3986%7Curn%3Auuid%3A11111111-1111-1111-1111-111111111111",
+            "authorization_base": "auth-123",
+        }
+    ]
+    assert sender_update_calls == [
+        {
+            "sender_bgz_base": "https://sender.example/notifiedpull/fhir",
+            "sender_access_token": "sender-status-token",
+            "workflow_task_id": "wf-1",
+            "status": "completed",
+            "authorization_base": "auth-123",
         }
     ]

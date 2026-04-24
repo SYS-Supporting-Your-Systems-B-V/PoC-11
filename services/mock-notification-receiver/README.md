@@ -31,6 +31,7 @@ Useful endpoints:
 - `GET /auth/dezi/callback`
 - `POST /auth/dezi/logout`
 - `POST /ui/tasks/{id}/pull`
+- `POST /ui/tasks/{id}/complete`
 - `GET /fhir/metadata`
 - `POST /fhir/Task`
 - `GET /fhir/Task`
@@ -65,12 +66,14 @@ Current DEZI + protected pull behavior:
 - the token exchange uses `private_key_jwt` with the configured certificate/key pair
 - in the Docker stack these files are expected under `secrets/mock-notification-receiver/dezi/`
 - the userinfo response is decrypted and validated locally
+- when DEZI exposes an introspection endpoint, the receiver can also fetch a `verklaring`, decrypt it locally with the same key material and use the resulting `token_id` as sender-attestation fallback
 - the resulting DEZI id-token is included in the local Nuts `request-service-access-token` call
 - sender data pull requires a real DEZI login result; the receiver no longer falls back to a self-attested DEZI credential payload
 - the sender `Nuts-OAuth` endpoint is resolved from the Query Directory using the sender URA from the incoming notification task
-- the workflow task is fetched via `GET /fhir/Task?identifier=...` using `Task.basedOn[0].identifier`
+- the workflow task is fetched via `GET /fhir/Task/{id}` using `Task.basedOn[0].reference`
 - subsequent sender pulls are derived from the fetched workflow task `Task.input` entries instead of a hardcoded receiver-side list
 - the sender BgZ base is resolved from the directory first and only falls back to the notification task extension for backward compatibility with older notifications
+- the operator can also trigger `POST /ui/tasks/{id}/complete`, which requests a sender token without DEZI attestation and sends `PUT /fhir/Task/{id}` with `status=completed`
 
 Important configuration:
 
@@ -82,6 +85,7 @@ Important configuration:
 - `MOCK_RECEIVER_SENDER_DATA_SCOPE`
 - `MOCK_RECEIVER_DEZI_WELL_KNOWN_URL`
 - `MOCK_RECEIVER_DEZI_CLIENT_ID`
+- `MOCK_RECEIVER_DEZI_INTROSPECTION_ENDPOINT`
 - `MOCK_RECEIVER_DEZI_CERTIFICATE_FILE`
 - `MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE`
 - `MOCK_RECEIVER_DEZI_VERIFY_TLS`

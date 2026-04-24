@@ -505,8 +505,8 @@
   <div class="shell">
     <section class="hero">
       <div>
-        <h1>Incoming Tasks, DEZI Login, Protected Pull</h1>
-        <p>This mock receiver shows the notification tasks it accepted, lets an operator establish a DEZI session, and then requests the protected workflow task and BgZ data from the sender using a Nuts access token that includes the DEZI id-token.</p>
+        <h1>Incoming Tasks, DEZI Pull, Sender Completion</h1>
+        <p>This mock receiver shows the notification tasks it accepted, lets an operator establish a DEZI session for protected pull, and can also send a status-only workflow task completion back to the sender without a DEZI login.</p>
       </div>
       <div class="toolbar">
         <div class="toolbar-group" id="status-badges"></div>
@@ -794,7 +794,8 @@
         "notification_summary" in value ||
         "dezi_identity" in value ||
         "sender_access_token" in value ||
-        "pulls" in value;
+        "pulls" in value ||
+        "task_update" in value;
 
       if (!looksLikePullResponse) {
         fragment.appendChild(createJsonSection("JSON", value));
@@ -813,6 +814,12 @@
       }
       if (value.sender !== undefined) {
         sections.push(["Sender", value.sender, false]);
+      }
+      if (value.workflow_task_lookup !== undefined) {
+        sections.push(["Workflow Task Lookup", value.workflow_task_lookup, false]);
+      }
+      if (value.task_update !== undefined) {
+        sections.push(["Task Update", value.task_update, true]);
       }
       const pulls = isObjectLike(value.pulls) ? value.pulls : {};
       const workflowTaskPull = Object.prototype.hasOwnProperty.call(pulls, "workflow_task") ? pulls.workflow_task : undefined;
@@ -880,8 +887,14 @@
       if (state.dezi.logged_in && state.dezi.userinfo_jwt) {
         identity.appendChild(createJsonSection("DEZI VC JWT", state.dezi.userinfo_jwt, { open: true }));
       }
+      if (state.dezi.logged_in && state.dezi.token_id) {
+        identity.appendChild(createJsonSection("DEZI token_id", state.dezi.token_id, { open: true }));
+      }
       if (state.dezi.logged_in && state.dezi.id_token) {
         identity.appendChild(createJsonSection("DEZI id_token", state.dezi.id_token, { open: true }));
+      }
+      if (state.dezi.logged_in && state.dezi.introspection && Object.keys(state.dezi.introspection).length) {
+        identity.appendChild(createJsonSection("DEZI Introspection", state.dezi.introspection, { open: true }));
       }
     }
 
@@ -987,6 +1000,33 @@
         }
       });
       actions.appendChild(pullButton);
+
+      const completeButton = document.createElement("button");
+      completeButton.type = "button";
+      completeButton.className = "secondary";
+      completeButton.textContent = "Complete Task";
+      completeButton.addEventListener("click", async () => {
+        completeButton.disabled = true;
+        showTaskResult("Task completion in progress...");
+        try {
+          const response = await fetch(appUrl(`ui/tasks/${encodeURIComponent(task.summary.id)}/complete`), {
+            method: "POST",
+            headers: {
+              "Accept": "application/json"
+            }
+          });
+          const payload = await response.json();
+          showTaskResult(payload);
+          if (!response.ok) {
+            return;
+          }
+        } catch (error) {
+          showTaskResult({ error: String(error) });
+        } finally {
+          completeButton.disabled = false;
+        }
+      });
+      actions.appendChild(completeButton);
 
       const resourceButton = document.createElement("button");
       resourceButton.type = "button";
