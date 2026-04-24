@@ -281,7 +281,6 @@ services:
       - "443:443"
     volumes:
       - ./caddy/${CADDYFILE_NAME:-Caddyfile}:/etc/caddy/Caddyfile:ro
-      - ../services/nuts-node/contexts:/srv/contexts:ro
       - caddy_data:/data
       - caddy_config:/config
     secrets:

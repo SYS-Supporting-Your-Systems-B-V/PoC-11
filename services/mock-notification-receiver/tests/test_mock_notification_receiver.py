@@ -764,7 +764,7 @@ def test_request_sender_access_token_uses_explicit_sender_scope(monkeypatch):
     ]
 
 
-def test_request_sender_access_token_includes_fallback_credentials(monkeypatch):
+def test_request_sender_access_token_includes_additional_credentials(monkeypatch):
     appmod = _import_app_module()
     _set_settings(monkeypatch, appmod)
     monkeypatch.setattr(appmod.settings, "sender_data_scope", "bgz-sender", raising=False)
@@ -795,18 +795,9 @@ def test_request_sender_access_token_includes_fallback_credentials(monkeypatch):
             sender_oauth_endpoint="https://sender.example/nuts-oauth2/oauth2/12345678",
             additional_credentials=[
                 {
-                    "@context": [
-                        "https://www.w3.org/2018/credentials/v1",
-                        "https://mach2.disyepd.com/contexts/dezi-user-credential-v1.ldjson",
-                    ],
-                    "type": "DeziUserCredential",
-                    "credentialSubject": {
-                        "identifier": "87654321",
-                        "employee": {
-                            "identifier": "dezi-001",
-                            "role": "01.041",
-                        },
-                    },
+                    "@context": ["https://www.w3.org/2018/credentials/v1"],
+                    "type": ["VerifiableCredential"],
+                    "credentialSubject": {"id": "did:web:example.com:subject"},
                 }
             ],
         )
@@ -822,18 +813,9 @@ def test_request_sender_access_token_includes_fallback_credentials(monkeypatch):
                 "scope": "bgz-sender",
                 "credentials": [
                     {
-                        "@context": [
-                            "https://www.w3.org/2018/credentials/v1",
-                            "https://mach2.disyepd.com/contexts/dezi-user-credential-v1.ldjson",
-                        ],
-                        "type": "DeziUserCredential",
-                        "credentialSubject": {
-                            "identifier": "87654321",
-                            "employee": {
-                                "identifier": "dezi-001",
-                                "role": "01.041",
-                            },
-                        },
+                        "@context": ["https://www.w3.org/2018/credentials/v1"],
+                        "type": ["VerifiableCredential"],
+                        "credentialSubject": {"id": "did:web:example.com:subject"},
                     }
                 ],
             },
@@ -841,104 +823,6 @@ def test_request_sender_access_token_includes_fallback_credentials(monkeypatch):
             "timeout": 10.0,
         }
     ]
-
-
-def test_build_sender_additional_credentials_uses_dezi_identity():
-    appmod = _import_app_module()
-
-    session = appmod.UserSession(session_id="sess-1", created_at="2026-04-20T14:26:59Z")
-    session.dezi_identity = {
-        "employee_identifier": "dezi-001",
-        "initials": "K.",
-        "surname": "Smith",
-        "roles": ["01.041"],
-        "organization_ura": "87654321",
-    }
-
-    credentials = appmod._build_sender_additional_credentials(session)
-
-    assert credentials == [
-        {
-            "@context": [
-                "https://www.w3.org/2018/credentials/v1",
-                "https://mach2.disyepd.com/contexts/dezi-user-credential-v1.ldjson",
-            ],
-            "type": "DeziUserCredential",
-            "credentialSubject": {
-                "identifier": "87654321",
-                "employee": {
-                    "identifier": "dezi-001",
-                    "initials": "K.",
-                    "surname": "Smith",
-                    "role": "01.041",
-                },
-            },
-        }
-    ]
-
-
-def test_issue_sender_additional_credentials_issues_signed_dezi_credentials(monkeypatch):
-    appmod = _import_app_module()
-    _set_settings(monkeypatch, appmod)
-
-    class _DummyResponse:
-        def __init__(self, status_code: int, body: dict):
-            self.status_code = status_code
-            self._body = body
-            self.text = ""
-
-        def json(self):
-            return self._body
-
-    class _FakeHttpClient:
-        def __init__(self):
-            self.post_calls = []
-
-        async def post(self, url, *, json=None, headers=None, timeout=None):
-            self.post_calls.append({"url": url, "json": json, "headers": headers or {}, "timeout": timeout})
-            return _DummyResponse(200, {"id": "cred-1", "type": ["DeziUserCredential", "VerifiableCredential"]})
-
-    fake = _FakeHttpClient()
-    monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
-
-    async def _fake_resolve_subject_did(subject_id: str):
-        assert subject_id == "87654321"
-        return "did:web:example.com:nuts:iam:test"
-
-    monkeypatch.setattr(appmod, "_resolve_subject_did", _fake_resolve_subject_did)
-
-    issued = asyncio.run(
-        appmod._issue_sender_additional_credentials(
-            subject_id="87654321",
-            credentials=[
-                {
-                    "@context": [
-                        "https://www.w3.org/2018/credentials/v1",
-                        "https://mach2.disyepd.com/contexts/dezi-user-credential-v1.ldjson",
-                    ],
-                    "type": "DeziUserCredential",
-                    "credentialSubject": {
-                        "identifier": "87654321",
-                        "employee": {
-                            "identifier": "dezi-001",
-                            "role": "01.041",
-                        },
-                    },
-                }
-            ],
-        )
-    )
-
-    assert issued == [{"id": "cred-1", "type": ["DeziUserCredential", "VerifiableCredential"]}]
-    assert fake.post_calls[0]["url"] == "http://nuts-node:8083/internal/vcr/v2/issuer/vc"
-    assert fake.post_calls[0]["json"]["issuer"] == "did:web:example.com:nuts:iam:test"
-    assert fake.post_calls[0]["json"]["type"] == "DeziUserCredential"
-    assert fake.post_calls[0]["json"]["@context"] == [
-        "https://www.w3.org/2018/credentials/v1",
-        "https://mach2.disyepd.com/contexts/dezi-user-credential-v1.ldjson",
-    ]
-    assert fake.post_calls[0]["json"]["credentialSubject"]["id"] == "did:web:example.com:nuts:iam:test"
-    assert fake.post_calls[0]["json"]["credentialSubject"]["employee"]["identifier"] == "dezi-001"
 
 
 def test_request_sender_access_token_requires_sender_scope(monkeypatch):

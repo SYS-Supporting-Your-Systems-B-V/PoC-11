@@ -12,7 +12,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Optional
@@ -1651,49 +1651,6 @@ def _sender_access_token_summary(token_payload: dict[str, Any], introspection: d
     }
 
 
-def _build_sender_additional_credentials(session: UserSession) -> list[dict[str, Any]]:
-    identity = session.dezi_identity if isinstance(session.dezi_identity, dict) else {}
-    employee_identifier = str(identity.get("employee_identifier") or "").strip()
-    organization_ura = str(identity.get("organization_ura") or settings.receiver_organization_ura or "").strip()
-    roles = _string_list(identity.get("roles"))
-    initials = str(identity.get("initials") or "").strip()
-    surname = str(identity.get("surname") or "").strip()
-    surname_prefix = str(identity.get("surname_prefix") or "").strip()
-    if not employee_identifier:
-        return []
-
-    if not roles:
-        roles = [""]
-
-    credentials: list[dict[str, Any]] = []
-    for role in roles:
-        employee: dict[str, Any] = {"identifier": employee_identifier}
-        if initials:
-            employee["initials"] = initials
-        if surname:
-            employee["surname"] = surname
-        if surname_prefix:
-            employee["surnamePrefix"] = surname_prefix
-        role_value = str(role or "").strip()
-        if role_value:
-            employee["role"] = role_value
-        subject: dict[str, Any] = {
-            "identifier": organization_ura,
-            "employee": employee,
-        }
-        credentials.append(
-            {
-                "@context": [
-                    "https://www.w3.org/2018/credentials/v1",
-                    "https://mach2.disyepd.com/contexts/dezi-user-credential-v1.ldjson",
-                ],
-                "type": "DeziUserCredential",
-                "credentialSubject": subject,
-            }
-        )
-    return credentials
-
-
 def _resolve_sender_subject_id(task: dict[str, Any]) -> str:
     return (
         str(settings.receiver_nuts_subject_id or "").strip()
@@ -1701,93 +1658,6 @@ def _resolve_sender_subject_id(task: dict[str, Any]) -> str:
         or str(settings.receiver_organization_ura or "").strip()
         or _dezi_client_id()
     )
-
-
-async def _resolve_subject_did(subject_id: str) -> str:
-    subject = str(subject_id or "").strip()
-    if not subject:
-        _raise_http(500, "misconfigured", "Geen receiver Nuts subject-id beschikbaar voor credential uitgifte.")
-
-    url = _join_url(settings.nuts_internal_base, f"/internal/vdr/v2/subject/{quote(subject, safe='')}")
-    try:
-        response = await app.state.http_client.get(
-            url,
-            headers={"Accept": "application/json"},
-            timeout=settings.sender_token_timeout,
-        )
-    except httpx.HTTPError as exc:
-        _raise_http(502, "sender_credential_issue_failed", "Het ophalen van de receiver DID via Nuts is mislukt.", error=str(exc))
-    if response.status_code >= 400:
-        _raise_http(
-            502,
-            "sender_credential_issue_failed",
-            "De Nuts node gaf een fout terug bij het ophalen van de receiver DID.",
-            status_code=response.status_code,
-            upstream_body=response.text[:1000],
-        )
-    try:
-        body = response.json()
-    except Exception as exc:
-        _raise_http(502, "sender_credential_issue_failed", "De Nuts node gaf geen geldige JSON terug voor de receiver DID lookup.", error=str(exc))
-    if not isinstance(body, list):
-        _raise_http(502, "sender_credential_issue_failed", "De Nuts node gaf geen DID lijst terug voor de receiver subject lookup.")
-    for did in body:
-        value = str(did or "").strip()
-        if value.startswith("did:web:"):
-            return value
-    if body:
-        return str(body[0] or "").strip()
-    _raise_http(502, "sender_credential_issue_failed", "Geen DID gevonden voor receiver subject in de Nuts node.", subject_id=subject)
-
-
-async def _issue_sender_additional_credentials(*, subject_id: str, credentials: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not credentials:
-        return []
-
-    issuer_did = await _resolve_subject_did(subject_id)
-    issue_url = _join_url(settings.nuts_internal_base, "/internal/vcr/v2/issuer/vc")
-    expiration = (_now_utc() + timedelta(hours=8)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    issued: list[dict[str, Any]] = []
-
-    for credential in credentials:
-        subject = copy.deepcopy(credential.get("credentialSubject") or {})
-        if not isinstance(subject, dict):
-            continue
-        payload = {
-            "@context": credential.get("@context"),
-            "issuer": issuer_did,
-            "type": "DeziUserCredential",
-            "expirationDate": expiration,
-            "credentialSubject": {
-                "id": issuer_did,
-                **subject,
-            },
-        }
-        try:
-            response = await app.state.http_client.post(
-                issue_url,
-                json=payload,
-                headers={"Accept": "application/json"},
-                timeout=settings.sender_token_timeout,
-            )
-        except httpx.HTTPError as exc:
-            _raise_http(502, "sender_credential_issue_failed", "Het issuën van een sender DeziUserCredential via Nuts is mislukt.", error=str(exc))
-        if response.status_code >= 400:
-            _raise_http(
-                502,
-                "sender_credential_issue_failed",
-                "De Nuts node gaf een fout terug bij het issuën van een sender DeziUserCredential.",
-                status_code=response.status_code,
-                upstream_body=response.text[:1000],
-            )
-        try:
-            body = response.json()
-        except Exception as exc:
-            _raise_http(502, "sender_credential_issue_failed", "De Nuts node gaf geen geldige JSON terug voor de sender DeziUserCredential.", error=str(exc))
-        if not isinstance(body, dict):
-            _raise_http(502, "sender_credential_issue_failed", "De Nuts node gaf geen credential object terug voor de sender DeziUserCredential.")
-        issued.append(body)
-    return issued
 
 
 def _sender_attestation_inputs(session: UserSession) -> tuple[str, Optional[str], list[dict[str, Any]]]:
