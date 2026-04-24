@@ -1,177 +1,274 @@
 # ITI-91 mCSD Update Client
 
-This service implements mCSD ITI-91 update behavior for PoC 11 - 13 and synchronizes
-mCSD resources from one or more source directories into the configured update
-client FHIR server.
+This service implements mCSD ITI-91 update behavior for the PoC 11/13 stack. It
+polls one or more source directories, rewrites source-local ids and references,
+and writes the transformed resources into the configured update-client FHIR
+server.
 
-The implementation originated from the reference project
-[`minvws/gfmodules-mcsd-update-client`](https://github.com/minvws/gfmodules-mcsd-update-client),
-but in this repository it has been extended substantially for PoC operations.
+The code started from the reference project
+`minvws/gfmodules-mcsd-update-client`, but this repository now carries
+PoC-specific extensions on top of it.
 
-## Running in this repository
+## What Is Different In This Repo
 
-For end-to-end local use, run this service through the Compose stack in
-[`../../poc9-start-stack/README.md`](../../poc9-start-stack/README.md). In that
-setup:
+Compared with the original reference implementation, this tree adds and relies
+on:
 
-- the service starts as `iti-91-mcsd-update-client`
-- `../../poc9-start-stack/iti-91.conf` is mounted as `/src/app.conf`
-- Postgres, Redis, `hapi-update-client`, and `hapi-directory` are provided by
+- directory-registry persistence and admin APIs
+- provider refresh flows and manual directory registration
+- more tolerant reference parsing and pagination handling
+- cache, retry, and connection-pooling hardening
+- per-directory lifecycle handling for unhealthy, ignored, and deleted entries
+- scheduler controls for background update and cleanup runs
+
+So in practice this service should be read as a PoC-specific update client with
+substantial local behavior, not as a verbatim copy of the upstream reference
+project.
+
+## Why This Service Matters In The Stack
+
+The update client is the bridge between external source directories and the
+local aggregated directory used by the rest of this PoC.
+
+In practical terms:
+
+- ITI-130 seeds a local source-style directory
+- ITI-91 discovers one or more external or local source directories
+- ITI-91 rewrites source-local ids and references
+- ITI-91 writes the transformed resources into the update-client FHIR store
+- downstream components such as the receiver and sender flows can use that
+  aggregated directory view without having to understand each upstream source
+  separately
+
+That is why this service is more than a scheduler wrapper. The id/rewrite and
+directory-lifecycle logic are the part that makes multiple sources coexist in
+one target store without collisions.
+
+## In This Repository
+
+For end-to-end local use, start the stack via
+[`../../start-stack/README.md`](../../start-stack/README.md). In that setup:
+
+- the container name is `iti-91-mcsd-update-client`
+- `../../start-stack/iti-91.conf` is mounted as `/src/app.conf`
+- the service listens on port `8509`
+- Postgres, Redis, `hapi-directory`, and `hapi-update-client` are provided by
   the same Compose network
-- the background scheduler starts immediately at bootstrap
 
-If you start the service directly from `services/iti-91`, it looks for
-`app.conf` in the current working directory by default. You can also switch to
-`app.<env>.conf` by setting `APP_ENV=<env>`.
+If you start the service directly from `services/iti-91`, it reads `app.conf`
+from the current working directory by default. Set `APP_ENV=<name>` to load
+`app.<name>.conf` instead.
 
-## Status in this repository
+For most work, the Compose stack is the safer path because it already provides
+the paired FHIR servers, Redis, and Postgres wiring that the service expects.
 
-This service is no longer "just the reference implementation". Compared to the
-upstream reference, `services/iti-91` contains major functional additions and
-behavior changes, including:
+## Main Routes
 
-- Directory registry persistence and APIs:
-  - New provider and provider-directory tables/migrations (`sql/017-...`)
-  - New `/admin/directory-registry/*` endpoints
-  - Manual directory registration and provider refresh workflows
-- Registry-backed directory sourcing:
-  - Optional `use_directory_registry_db` mode
-  - Multiple `directories_provider_urls` support
-  - Endpoint-address deduping and origin tracking (`provider` vs `manual`)
-- More resilient FHIR directory discovery:
-  - Fallback from `Organization` search to `Endpoint` search
-  - Better pagination handling for expiring `_getpages` links
-  - More permissive reference parsing for absolute and query references
-- Update/sync engine hardening:
-  - Optional parallel updates (`scheduler.max_concurrent_directory_updates`)
-  - Per-directory lock protection and richer update status responses
-  - Resource dependency ordering before transaction bundle submission
-  - Better unresolved-reference handling (best-effort continuation)
-  - Bulk cache existence checks and batched resource-map writes
-- Cache and HTTP robustness improvements:
-  - Namespaced per-run cache keys, TTL support, and Redis health fallback
-  - Retry logic for transient HTTP failures/statuses with backoff + jitter
-  - Connection pooling support for outbound HTTP calls
-- Operational lifecycle controls:
-  - Reason tracking for ignored directories (`reason_ignored`)
-  - Improved stale/offline/error handling and cleanup paths
-  - Timezone-safe stale/deletion processing
+Basic:
 
-## Why this is PoC-ready
+- `GET /`
+- `GET /version.json`
+- `GET /health`
+- `GET /update_client`
 
-For PoC execution, this implementation is ready because it supports practical
-cross-directory synchronization under imperfect real-world conditions:
+Directory status and metrics:
 
-- It can continuously discover and refresh directory endpoints from LRZa and/or
-  manually registered sources.
-- It tolerates partial interoperability mismatches and transient failures well
-  enough to keep PoC flows running.
-- It includes admin endpoints to inspect/adjust provider and directory state
-  without redeploying.
-- It has explicit lifecycle logic for stale, ignored, removed, and deleted
-  directories.
-- It includes significant automated coverage in `tests/` for update flow,
-  caching, directory registry behavior, scheduler behavior, and FHIR reference
-  handling.
+- `GET /directory/health`
+- `GET /directory/metrics`
+- `GET /directory/all`
+- `GET /directory/{id}`
 
-## Current PoC settings (`poc9-start-stack/iti-91.conf`)
+Ignore list:
 
-The running PoC stack mounts
-[`../../poc9-start-stack/iti-91.conf`](../../poc9-start-stack/iti-91.conf) as
-`/src/app.conf` in the ITI-91 container.
+- `GET /directory_ignore_list/all`
+- `GET /directory_ignore_list/{directory_id}`
+- `POST /directory_ignore_list/{directory_id}`
+- `DELETE /directory_ignore_list/{directory_id}`
 
-Key active settings are:
+Update and scheduler control:
 
-- `[app]`: `loglevel=debug`
-- `[scheduler]`: `delay_input=5m`, automatic update/cleanup enabled
-- `[mcsd]`: `authentication=off`, `check_capability_statement=False`,
-  `require_mcsd_profiles=False`, `allow_missing_resources=True`
-- `[uvicorn]`: `reload=True`, `swagger_enabled=True`, `use_ssl=False`
-- `[external_cache]`: Redis enabled, `ssl=False`
-- `[client_directory]`:
-  - `directories_provider_urls=https://knooppunt-test.nuts-services.nl/lrza/mcsd`
-  - `use_directory_registry_db=True`
-  - lifecycle thresholds enabled for unhealthy/ignored/deleted handling
+- `POST /update_resources`
+- `POST /update_resources/{directory_id}`
+- `POST /scheduler/update/start`
+- `POST /scheduler/update/stop`
+- `GET /scheduler/update/runner_logs`
+- `POST /scheduler/cleanup/start`
+- `POST /scheduler/cleanup/stop`
+- `GET /scheduler/cleanup/runner_logs`
 
-## Operational caveat with the shipped PoC config
+Registry and resource mapping:
 
-The default `directories_provider_urls` points to an external test LRZa. That
-means the container can be healthy and reachable on `/health` while background
-directory updates still log validation, data-shape, or interoperability errors
-from remote directories. This does not prevent the local stack from booting, but
-it does mean update completeness depends on the current state of that external
-test environment.
+- `GET /resource_map`
+- `GET /admin/directory-registry/providers`
+- `POST /admin/directory-registry/providers`
+- `POST /admin/directory-registry/providers/refresh`
+- `POST /admin/directory-registry/directories`
 
-## Why current PoC settings are not production-ready
+## Route Guide
 
-The following active settings deliberately make this deployment more forgiving
-for PoC usage, but less strict/secure than production:
+The route list above is easier to use when grouped by operational intent:
 
-| Setting (current value) | PoC benefit | Production concern |
-| --- | --- | --- |
-| `mcsd.check_capability_statement=False` | Allows syncing from endpoints that do not fully advertise capabilities | Can ingest from non-compliant servers without early failure |
-| `mcsd.require_mcsd_profiles=False` | Accepts servers that do not declare expected mCSD/NL-GF profiles | Reduces profile-level interoperability guarantees |
-| `mcsd.allow_missing_resources=True` | Skips unsupported resource types instead of failing the whole update | Can silently produce partial datasets |
-| `mcsd.authentication=off` | Simplifies local integration and testing | No authentication/authorization protection |
-| `uvicorn.reload=True` | Faster development iteration | Dev-mode behavior; in this codebase also enables permissive CORS (`*`) |
-| `uvicorn.use_ssl=False` | Simplifies local networking | API traffic is unencrypted |
-| `external_cache.ssl=False` | Simplifies local Redis setup | Cache traffic is unencrypted |
-| `app.loglevel=debug` | More troubleshooting detail during PoC | Verbose logs may expose sensitive operational data |
-| `directories_provider_urls=.../knooppunt-test...` | Directly uses a test LRZa source | Depends on non-production upstream service behavior |
+- `GET /health` answers "is the service process alive?"
+- `GET /directory/health` answers "what is the health state of the known
+  directories?"
+- `GET /directory/all` and `GET /directory/{id}` are the main inspection routes
+  for current directory state
+- `POST /update_resources` and `POST /update_resources/{directory_id}` trigger a
+  foreground sync run immediately
+- `/scheduler/*` starts, stops, and inspects the background update/cleanup
+  runners
+- `/admin/directory-registry/*` manages provider and manual-directory discovery
+  inputs
+- `GET /resource_map` is the inspection surface for source-to-target mapping
+  state
 
-Additional production gaps in this PoC profile:
+That distinction matters operationally: a healthy process with a running
+scheduler can still have unhealthy source directories, ignored entries, or
+partially synchronized remote data.
 
-- default local DB credentials are used in the DSN
-- telemetry and stats are disabled (`enabled=False`)
-- automatic background update and cleanup start immediately at bootstrap
+## Current Stack Settings
 
-## Service docs
+The default local stack mounts
+[`../../start-stack/iti-91.conf`](../../start-stack/iti-91.conf). Important
+active settings there are:
 
-- Architecture and behavior details: [`docs/README.md`](docs/README.md)
-- Full PoC stack startup/operations: [`../../poc9-start-stack/README.md`](../../poc9-start-stack/README.md)
-- Repository-level setup and licensing context: [`../../README.md`](../../README.md)
+- `app.loglevel=debug`
+- `scheduler.delay_input=5m`
+- `scheduler.automatic_background_update=True`
+- `scheduler.automatic_background_cleanup=True`
+- `mcsd.authentication=off`
+- `mcsd.check_capability_statement=False`
+- `mcsd.require_mcsd_profiles=False`
+- `mcsd.allow_missing_resources=True`
+- `external_cache.ssl=False`
+- `uvicorn.reload=True`
+- `client_directory.directories_provider_urls=https://knooppunt-test.nuts-services.nl/lrza/mcsd`
+- `client_directory.use_directory_registry_db=True`
 
-## Setup context
+Those defaults are intentionally forgiving for PoC use and are not
+production-grade settings.
 
-To test ITI-91 behavior you need at least:
+That tradeoff is deliberate: the service prefers to keep synchronization moving
+through partial interoperability problems instead of failing early on every
+upstream inconsistency.
 
-- one update client FHIR store
-- one or more source directory FHIR stores
+## Configuration Guidance
 
-This repository provides those dependencies through `poc9-start-stack`.
+The mounted `iti-91.conf` is the real control plane for this service. The most
+important sections are:
 
-For a reproducible local setup, prefer the Compose stack over a standalone run.
+- `[mcsd]` for source validation behavior, auth mode, and target update-client
+  base URL
+- `[client_directory]` for where directories are discovered and how lifecycle
+  state is handled
+- `[scheduler]` for background run cadence and retention
+- `[external_cache]` for Redis-backed caching
+- `[database]` for Postgres connectivity and pooling
+- `[uvicorn]` for the local API listener and dev-mode behavior
 
-## Docker container builds
+A few settings are especially important to understand:
 
-`make container-build` and `make container-build-sa` are convenience wrappers
-from the original reference project. On environments without GNU `make`
-(for example many Windows setups), use the direct `docker build` commands below.
+- `mcsd.update_client_url` is the FHIR target this service writes into
+- `client_directory.directories_provider_urls` points discovery at one or more
+  LRZa/provider endpoints
+- `client_directory.use_directory_registry_db=True` means the DB is part of the
+  discovery state, not just a transient scratch store
+- lifecycle thresholds such as
+  `directory_marked_as_unhealthy_after_success_timeout` and
+  `ignore_client_directory_after_failed_attempts_threshold` control when remote
+  sources move through degraded states
+- `scheduler.automatic_background_update=True` and
+  `scheduler.automatic_background_cleanup=True` mean the service starts active
+  background behavior as soon as it boots
 
-Default mode (runs with `docker/init.sh` entrypoint):
+Because the service keeps registry and resource-map state in Postgres, the DB is
+not just an implementation detail. It is part of the operational behavior.
+
+## Why The Shipped Config Is PoC-Friendly But Not Production-Ready
+
+The mounted default config intentionally biases toward interoperability and
+debuggability instead of strictness.
+
+Important examples from the current stack config:
+
+- `mcsd.authentication=off`
+- `mcsd.check_capability_statement=False`
+- `mcsd.require_mcsd_profiles=False`
+- `mcsd.allow_missing_resources=True`
+- `uvicorn.reload=True`
+- `uvicorn.use_ssl=False`
+- `external_cache.ssl=False`
+- `app.loglevel=debug`
+
+Those settings help the PoC because they allow the client to keep processing
+through imperfect upstream directories and make debugging easier. They are not
+good production defaults because they reduce strict validation, weaken
+transport/security posture, and increase the chance of partial-but-accepted
+data.
+
+## Why This Is Still Useful For PoC Work
+
+Despite those relaxed settings, the current implementation is operationally
+useful for PoC work because it adds exactly the pieces that a real multi-source
+demo needs:
+
+- persistent provider and directory registry state
+- manual provider refresh and directory registration
+- lifecycle handling for ignored, unhealthy, and deleted directories
+- retry, cache, and connection-pooling hardening
+- more tolerant reference parsing and pagination handling
+- source-to-target resource tracking through the resource map
+
+That is the difference between "a reference client that can sync in ideal
+conditions" and "a PoC client that keeps moving when upstreams are inconsistent
+or partially broken".
+
+## Operational Caveat
+
+The shipped configuration points at the external test LRZa
+`https://knooppunt-test.nuts-services.nl/lrza/mcsd`. The service can therefore
+be healthy on `/health` while individual background directory updates still log
+validation or interoperability errors from remote systems.
+
+So `/health` only tells you the client itself is up. It does not guarantee that
+every configured source directory is currently valid, reachable, or fully
+ingested.
+
+## Setup Context
+
+To exercise this service meaningfully you need at least:
+
+- one update-client FHIR store
+- one or more source directory FHIR stores or provider endpoints
+- Postgres for directory and resource-map persistence
+- Redis for the configured external cache behavior
+
+That is why the Compose stack is the recommended local path. A standalone run is
+possible, but it is much easier to misread failures when the paired target
+stores and support services are not already present.
+
+## Local Run
 
 ```bash
-cd services/iti-91
-docker build --build-arg NEW_UID=1000 --build-arg NEW_GID=1000 -f docker/Dockerfile .
+python -m venv .venv
+. .venv/bin/activate
+pip install poetry
+poetry install --no-root
+python -m app.main
 ```
 
-Standalone mode (uses `docker/init-standalone.sh` entrypoint):
+## Tests
 
 ```bash
-cd services/iti-91
-docker build --build-arg standalone=true -f docker/Dockerfile .
+pytest -vv tests
 ```
 
-Standalone mode expects a config mounted as `/src/app.conf` at runtime.
+The test suite in this repo covers scheduler behavior, directory registry
+handling, update flow, reference rewriting, cache behavior, and router-level
+API behavior.
 
-If GNU `make` is installed, these wrappers are equivalent:
+## Related Docs
 
-```bash
-make container-build
-make container-build-sa
-```
-
-## Licensing
-
-- Service code: EUPL-1.2 (`LICENSE.md` in this folder)
-- Repository-level context: [`../../README.md`](../../README.md)
+- Architecture notes: [`docs/README.md`](docs/README.md)
+- Full stack: [`../../start-stack/README.md`](../../start-stack/README.md)
+- Repository overview: [`../../README.md`](../../README.md)

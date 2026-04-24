@@ -1,150 +1,196 @@
-# PoC 9 Start Stack
+# PoC 11-13 Start Stack
 
-This folder contains the Docker Compose stack used to run the full PoC locally:
-ITI-91, ITI-90, ITI-130, three HAPI FHIR servers, Postgres, Redis, and an
-optional Caddy reverse proxy.
+This folder contains the Docker Compose stack used for the integrated local PoC:
+
+- `iti-130-publisher`
+- `iti-91-mcsd-update-client`
+- `iti-90-address-book-proxy`
+- `sender-bgz-gateway`
+- `mock-notification-receiver`
+- `nuts-node`
+- three HAPI FHIR servers
+- Postgres, Redis, and optional Caddy
 
 ## Prerequisites
 
-- Docker Desktop / Docker Engine with the Compose plugin
-- free host ports: `443` (only when using profile `caddy`), `5432`, `8000`,
-  `8080`, `8081`, `8082`, `8509`, `16379`
-- `../secrets/cloudflare_api_token` only when using profile `caddy`
-- `../secrets/` is the central location for runtime certificates and keys used by the stack
+- Docker Desktop or Docker Engine with the Compose plugin
+- free host ports: `443`, `5432`, `8000`, `8001`, `8002`, `8080`, `8081`,
+  `8082`, `8083`, `8084`, `8509`, `16379`
+- `../secrets/` present for runtime certificates and keys
+- `../secrets/cloudflare_api_token` only when the `caddy` profile is enabled
+  with `Caddyfile`
 
-## First-time setup
+The shipped `.env` enables `COMPOSE_PROFILES=caddy` by default.
 
-The repository already contains working PoC defaults in these tracked files:
+## Files To Review
 
-- `poc9-start-stack/.env`
-- `poc9-start-stack/iti-91.conf`
-- `services/iti-90/.env.Docker`
+- `.env`
+- `iti-91.conf`
+- `../services/iti-90/.env.Docker`
+- `../services/mock-notification-receiver/.env`
+- `../SECRETS.md`
 
-If you want to reset them to the starter templates, copy:
+If you want to reset the tracked defaults:
 
-- `iti-91.conf.example` -> `iti-91.conf`
-- `.env.example` -> `.env`
+```bash
+cp .env.example .env
+cp iti-91.conf.example iti-91.conf
+```
 
-Before you start, review at least:
+## Before First Start
 
-- `iti-91.conf` for the ITI-91 update-client settings
-- `.env` for optional Compose profiles such as `caddy`
-- `../services/iti-90/.env.Docker` for ITI-90 upstream, sender settings, and `MCSD_RECEIVER_NOTIFICATION_SCOPE`
-- `.env` for optional BGZ scope overrides for `mock-notification-receiver` and `sender-bgz-gateway`
-- `../SECRETS.md` for the `secrets/<service>/...` layout and test cert generation
+The stack has a few pre-start requirements that are easy to miss because Docker
+mounts them directly from the repo root `secrets/` tree.
+
+### Nuts Node TLS Files
+
+`nuts-node` mounts `../secrets/nuts-node/tls` into `/opt/nuts/certs` and its
+runtime config expects these filenames:
+
+- `${PUBLIC_DOMAIN}.pem`
+- `${PUBLIC_DOMAIN}.key`
+- `${PUBLIC_DOMAIN}-chain.pem`
+
+With the default `PUBLIC_DOMAIN=mach2.disyepd.com`, the required files are:
+
+- `../secrets/nuts-node/tls/mach2.disyepd.com.pem`
+- `../secrets/nuts-node/tls/mach2.disyepd.com.key`
+- `../secrets/nuts-node/tls/mach2.disyepd.com-chain.pem`
+
+If these files are missing, `nuts-node` cannot start. If you change
+`PUBLIC_DOMAIN`, you must also provide matching filenames in that folder.
+
+For the local fake-UZI/TLS workflow, see:
+
+- [`../services/nuts-node/certs/create_fake_UZI_cert.md`](../services/nuts-node/certs/create_fake_UZI_cert.md)
+
+### Mock Receiver DEZI Material
+
+`mock-notification-receiver` mounts the full `../secrets` tree and, by default,
+looks for:
+
+- `../secrets/mock-notification-receiver/dezi/certificaat_SYS_DEZI.crt`
+- `../secrets/mock-notification-receiver/dezi/sleutel_SYS_DEZI.key`
+
+Those files are required for the receiver-side DEZI login flow and for the UI
+`pull` action that exchanges the DEZI-backed sender token.
+
+The service can still start and receive notification `Task` resources without
+them, but `/dezi` login and operator pull actions will fail when the certificate
+or key is missing or invalid.
+
+Also verify the runtime DEZI settings in
+[`../services/mock-notification-receiver/.env`](../services/mock-notification-receiver/.env):
+
+- `MOCK_RECEIVER_DEZI_CLIENT_ID`
+- `MOCK_RECEIVER_PUBLIC_ROOT`
+- `MOCK_RECEIVER_DEZI_CALLBACK_PATH`
+
+Those values must match the DEZI client registration. If the public root or
+callback path differs from what is registered, login will fail even when the
+certificate files are present.
+
+### Caddy Mode
+
+The shipped `.env.example` uses `Caddyfile.local`, which is the easiest local
+setup. If you switch to `Caddyfile`, you must also provide
+`../secrets/cloudflare_api_token`.
+
+With `Caddyfile.local`, browsers trust the HTTPS endpoint only after you trust
+Caddy's local root CA. If you do not need browser HTTPS, you can also use the
+direct `localhost` service endpoints instead.
 
 ## Start
 
 From the repository root:
 
 ```bash
-cd poc9-start-stack
+cd start-stack
 docker compose up -d
 ```
 
-The first start can take a few minutes. HAPI FHIR must become healthy before the
-app services and one-shot seed jobs can finish.
+The first start can take a few minutes because the HAPI servers, Postgres, and
+the helper health containers must be ready before the application services and
+one-shot seed jobs can finish.
 
-Main local endpoints:
+## Main Endpoints
 
 - ITI-91 API docs: <http://localhost:8509/docs>
 - ITI-90 API docs: <http://localhost:8000/docs>
+- Sender gateway: <http://localhost:8001/health>
+- Mock receiver: <http://localhost:8002/health>
 - Directory FHIR: <http://localhost:8080/fhir>
-- Update Client FHIR: <http://localhost:8081/fhir>
-- Notified Pull FHIR: <http://localhost:8082/fhir>
-- Postgres: `localhost:5432`
+- Update-client FHIR: <http://localhost:8081/fhir>
+- Notified-pull FHIR: <http://localhost:8082/fhir>
+- Nuts node: <http://localhost:8083/health>
 - Redis: `localhost:16379`
-- Caddy HTTPS endpoint: <https://localhost:443> when profile `caddy` is enabled
+- Postgres: `localhost:5432`
+- Caddy public HTTPS: <https://localhost:443> when `caddy` is enabled
 
-## Expected state after startup
+## Expected State
 
-Use:
+Check:
 
 ```bash
 docker compose ps --all
 ```
 
-Healthy default behavior looks like this:
+Default healthy behavior:
 
-| Service | Expected state | Notes |
-| --- | --- | --- |
-| `postgres` | `Up (healthy)` | Database for the HAPI and ITI-91 services |
-| `redis` | `Up` | External cache for ITI-91 |
-| `hapi-directory` | `Up` | Local source directory FHIR server |
-| `hapi-update-client` | `Up` | ITI-91 target/update-client FHIR server |
-| `hapi-notifiedpull-stu3` | `Up` | Local notified-pull FHIR server |
-| `hapi-*-health` | `Up (healthy)` | Helper containers that gate startup |
-| `iti-91-mcsd-update-client` | `Up (healthy)` | FastAPI service on port `8509` |
-| `iti-90-address-book-proxy` | `Up` | FastAPI service on port `8000` |
-| `iti-130-publisher` | `Exited (0)` | One-shot seed job for `hapi-directory` |
-| `notifiedpull-seed` | `Exited (0)` | One-shot seed job for `hapi-notifiedpull-stu3` |
-| `caddy` | `Up` | Only when profile `caddy` is enabled |
+- long-running services show `Up`
+- `iti-130-publisher` finishes as `Exited (0)`
+- `notifiedpull-seed` finishes as `Exited (0)`
+- `iti-91-mcsd-update-client` becomes healthy on `/health`
+- the HAPI helper containers become healthy and stay running
 
-`iti-130-publisher` and `notifiedpull-seed` are supposed to finish and exit.
-That is not a failure.
+`iti-130-publisher` and `notifiedpull-seed` are supposed to exit successfully.
+That is normal.
 
 ## Verify
 
-Run these from the host:
+Run from the host:
 
 ```bash
 docker compose ps --all
 curl http://localhost:8509/health
 curl http://localhost:8000/health
+curl http://localhost:8001/health
+curl http://localhost:8002/health
 curl 'http://localhost:8080/fhir/Organization?_summary=count&_count=1'
 curl 'http://localhost:8082/fhir/Task?_summary=count&_count=1'
 ```
 
-What to expect:
+What to expect by default:
 
 - ITI-91 health returns HTTP `200`
 - ITI-90 health returns HTTP `200`
-- the default ITI-130 demo load publishes 13 `Organization` resources into
-  `hapi-directory`
-- the default notified-pull seed publishes 1 `Task`
+- sender gateway and mock receiver health endpoints return HTTP `200`
+- the ITI-130 demo seed publishes 13 `Organization` resources to `hapi-directory`
+- the notified-pull seed publishes 1 `Task` to `hapi-notifiedpull-stu3`
 
-Operational caveats that are easy to miss:
+## Configuration Map
 
-- ITI-90 enforces `MCSD_ALLOWED_HOSTS`. Access it via `localhost:8000` or
-  another host listed in `services/iti-90/.env.Docker`; otherwise it returns
-  `Invalid host header`.
-- ITI-91 starts background sync immediately. With the shipped PoC config it
-  connects to the external test LRZa
-  `https://knooppunt-test.nuts-services.nl/lrza/mcsd`, so the service can be
-  healthy while individual remote-directory updates still log validation or
-  interoperability errors.
+Use these files as the main configuration surface:
 
-## Config map
+- `iti-91.conf`: ITI-91 runtime config mounted as `/src/app.conf`
+- `.env`: Compose profile toggles and shared stack-level overrides
+- `../services/iti-90/.env.Docker`: ITI-90 runtime config loaded via `env_file`
+- `client.application.yaml`: HAPI update-client config
+- `directory.application.yaml`: HAPI directory config
+- `notifiedpull-stu3.application.yaml`: HAPI notified-pull config
+- `create-dbs.sql`: Postgres initialization for first boot
 
-Use this table to identify what must be configured for your own setup.
+Stack-specific items that are easy to miss:
 
-| File / Variable | Used by service(s) | Required | Purpose |
-| --- | --- | --- | --- |
-| `iti-91.conf` | `iti-91-mcsd-update-client` | Yes | Main ITI-91 runtime config (mounted to `/src/app.conf`) |
-| `iti-91.conf:[mcsd]update_client_url` | `iti-91-mcsd-update-client` | Yes | Target FHIR base where ITI-91 writes synchronized resources |
-| `iti-91.conf:[client_directory]directories_provider_urls` | `iti-91-mcsd-update-client` | Yes (when using LRZa discovery) | One or more directory-registry/LRZa endpoints |
-| `.env` | `docker compose` | Usually | Local compose toggles (for example `COMPOSE_PROFILES`) |
-| `.env:COMPOSE_PROFILES` | `docker compose` | No | Optional profile toggles such as `caddy` |
-| `../services/iti-90/.env.Docker` | `iti-90-address-book-proxy` | Yes | ITI-90 runtime settings loaded via `env_file` |
-| `../services/iti-90/.env.Docker:MCSD_BASE` | `iti-90-address-book-proxy` | Yes | Upstream mCSD/FHIR base URL for ITI-90 |
-| `../services/iti-90/.env.Docker:MCSD_RECEIVER_NOTIFICATION_SCOPE` | `iti-90-address-book-proxy` | Required for BGZ policy scope selection | Receiver notification scope to request from Nuts, e.g. `bgz-receiver` |
-| `../secrets/iti-90/mtls/*` | `iti-90-address-book-proxy` | Alleen voor upstream mTLS | Test UZI clientcertificaat + key voor externe FHIR-server |
-| `../secrets/shared/nuts-development-network-ca/stable/ca.pem` | `iti-90-address-book-proxy` | Alleen voor upstream mTLS/TLS met Nuts stable CA | Trust anchor voor de externe FHIR-server |
-| `../secrets/mock-notification-receiver/dezi/*` | `mock-notification-receiver` | Ja voor DEZI login | Certificaat + private key voor `private_key_jwt` naar DEZI |
-| `.env:MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE` | `mock-notification-receiver` | Required for BGZ policy scope selection | Scope expected on incoming notification tokens, e.g. `bgz-receiver` |
-| `.env:MOCK_RECEIVER_SENDER_DATA_SCOPE` | `mock-notification-receiver` | Required for BGZ policy scope selection | Scope requested for follow-up sender data access, e.g. `bgz-sender` |
-| `.env:BGZ_GATEWAY_REQUIRED_SCOPES` | `sender-bgz-gateway` | Optional | Comma/JSON allowlist of accepted sender data scopes, e.g. `bgz-sender` |
-| `../secrets/nuts-node/tls/*` | `nuts-node` | Ja voor lokale Nuts TLS | TLS-certificaten die gemount worden naar `/opt/nuts/certs` |
-| `../services/iti-90/.env.Docker:MCSD_SENDER_*` | `iti-90-address-book-proxy` | Required for BgZ notify flow | Sender identity used in PoC notification flows |
-| `client.application.yaml` | `hapi-update-client` | Yes | HAPI config for update-client-side FHIR server |
-| `directory.application.yaml` | `hapi-directory` | Yes | HAPI config for source directory FHIR server |
-| `notifiedpull-stu3.application.yaml` | `hapi-notifiedpull-stu3` | Yes | HAPI config for notified-pull FHIR server |
-| `create-dbs.sql` | `postgres` | Yes | Database initialization script (first startup) |
-| `../secrets/cloudflare_api_token` | `caddy` | Only if `caddy` profile enabled | Cloudflare API token used by Caddy |
+- `.env:MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE`
+- `.env:MOCK_RECEIVER_SENDER_DATA_SCOPE`
+- `.env:BGZ_GATEWAY_REQUIRED_SCOPES`
+- `../services/iti-90/.env.Docker:MCSD_RECEIVER_NOTIFICATION_SCOPE`
+- `../services/iti-90/.env.Docker:MCSD_SENDER_*`
 
-## Seed and reset operations
+## Common Operations
 
-Re-run the ITI-130 publisher seed:
+Re-run the ITI-130 seed job:
 
 ```bash
 docker compose run --rm iti-130-publisher
@@ -156,10 +202,10 @@ Re-run the notified-pull seed bundle:
 docker compose run --rm notifiedpull-seed
 ```
 
-Follow the most useful logs while debugging startup:
+Follow the most useful logs:
 
 ```bash
-docker compose logs -f iti-130-publisher iti-91-mcsd-update-client iti-90-address-book-proxy
+docker compose logs -f iti-130-publisher iti-91-mcsd-update-client iti-90-address-book-proxy sender-bgz-gateway mock-notification-receiver
 ```
 
 Stop the stack:
@@ -168,48 +214,41 @@ Stop the stack:
 docker compose down
 ```
 
-This stack does not mount Postgres to a named volume. `docker compose down`
-therefore removes the Postgres container and resets stored stack state. Use
-`docker compose down -v` only when you also want to remove the optional Caddy
-volumes.
+This stack does not use a named Postgres volume. A plain `docker compose down`
+removes the Postgres container and resets the stored FHIR state for the next
+run. Use `docker compose down -v` only when you also want to remove the optional
+Caddy volumes.
 
-## Optional Caddy profile
+## Notes
 
-Enable Caddy in one of these ways:
+- ITI-90 enforces `MCSD_ALLOWED_HOSTS`. Access it via `localhost:8000` or
+  another host listed in `../services/iti-90/.env.Docker`.
+- ITI-91 starts background sync immediately. The shipped config points at the
+  external test LRZa `https://knooppunt-test.nuts-services.nl/lrza/mcsd`, so a
+  healthy container does not guarantee all remote directories synced cleanly.
+- Without Caddy, use the direct local HAPI and FastAPI endpoints.
 
-```bash
-# option 1: in .env
-COMPOSE_PROFILES=caddy
+## Local Test Certificate Helper
 
-# option 2: command line
-docker compose --profile caddy up -d
-```
-
-The Caddy profile requires `../secrets/cloudflare_api_token` and exposes
-`mach2.disyepd.com` on port `443`.
-
-When you need a local test-UZI clientcert for ITI-90 mTLS, generate it from the
-repo root with:
+Generate the local ITI-90 test UZI mTLS material from the repo root with:
 
 ```bash
 ./scripts/setup-test-uzi-mtls.sh
 ```
 
-Without Caddy, use the direct HAPI endpoints such as
-`http://localhost:8080/fhir`.
-
-## Running the pytests for each service without starting the full stack
+## Service Tests Without Full Startup
 
 ```bash
-# ITI-90:
-docker compose -f poc9-start-stack/docker-compose.yaml run --rm --no-deps --entrypoint "pytest -vv tests" iti-90-address-book-proxy
-
-# ITI-91:
-docker compose -f poc9-start-stack/docker-compose.yaml run --rm --no-deps --entrypoint "pytest -vv tests" iti-91-mcsd-update-client
-
-# ITI-130:
-docker compose -f poc9-start-stack/docker-compose.yaml run --rm --no-deps --entrypoint "pytest -vv tests" iti-130-publisher
+docker compose -f start-stack/docker-compose.yaml run --rm --no-deps --entrypoint pytest iti-90-address-book-proxy -vv tests
+docker compose -f start-stack/docker-compose.yaml run --rm --no-deps --entrypoint pytest iti-91-mcsd-update-client -vv tests
+docker compose -f start-stack/docker-compose.yaml run --rm --no-deps --entrypoint pytest iti-130-publisher -vv tests
+docker compose -f start-stack/docker-compose.yaml run --rm --no-deps --entrypoint sh sender-bgz-gateway -lc "pip install --quiet pytest && pytest -vv tests"
+docker compose -f start-stack/docker-compose.yaml run --rm --no-deps --entrypoint sh mock-notification-receiver -lc "pip install --quiet pytest && pytest -vv tests"
 ```
 
-`docker compose run` starts `depends_on` services by default. `--no-deps` keeps
-these test runs isolated, which is sufficient for the current test suites.
+At the moment, `sender-bgz-gateway` and `mock-notification-receiver` have test
+directories in the repo, but their images do not install `pytest` by default.
+That is why their one-off test commands install `pytest` first.
+
+The remaining stack components do not currently ship a local pytest suite in
+this repository.

@@ -1,188 +1,112 @@
-# PoC 11 - 13 SYS
+# PoC 11-13 SYS
 
-This repository contains the integrated PoC 11 - 13 setup for mCSD-based workflows in
-the "Generieke Functies, lokalisatie en addressering" context, covering ITI-90,
-ITI-91, and ITI-130.
+This repository contains the local PoC 11/13 stack for mCSD directory exchange
+and BgZ notified-pull testing around:
+
+- [ITI-90](https://profiles.ihe.net/ITI/mCSD/ITI-90.html)
+- [ITI-91](https://profiles.ihe.net/ITI/mCSD/ITI-91.html)
+- [ITI-130](https://profiles.ihe.net/ITI/mCSD/ITI-130.html)
+
+It includes:
+
+- `services/iti-130`: one-shot directory publisher
+- `services/iti-91`: update client plus directory-registry extensions
+- `services/iti-90`: address-book proxy and notification builder
+- `services/sender-bgz-gateway`: protected sender-side follow-up API
+- `services/mock-notification-receiver`: receiver-side test harness
+- `start-stack`: the canonical Docker Compose setup
 
 > [!CAUTION]
-> This repository is for PoC/testing and documentation purposes. It is **NOT**
-> intended for production use.
+> This repository is for PoC, test, and documentation use only. It is not
+> production-ready.
 
-## Quickstart (10 min)
+## Quickstart
 
 Prerequisites:
 
-- Docker Desktop / Docker Engine with the Compose plugin
-- the following host ports are free: `443` (only when using profile `caddy`),
-  `5432`, `8000`, `8080`, `8081`, `8082`, `8509`, `16379`
+- Docker Desktop or Docker Engine with the Compose plugin
+- free host ports: `443` (when `caddy` is enabled), `5432`, `8000`, `8001`,
+  `8002`, `8080`, `8081`, `8082`, `8083`, `8084`, `8509`, `16379`
+- runtime secrets under `secrets/`
 
-1. Review local config files.
+Before first start, verify these setup items:
 
-The repository already contains working PoC defaults in
-`start-stack/.env`, `start-stack/iti-91.conf`, and
-`services/iti-90/.env.Docker`. If you want to reset them to the shipped
-templates, copy the example files below.
+- `start-stack/.env`: `PUBLIC_DOMAIN` must match the Nuts TLS filenames under
+  `secrets/nuts-node/tls/`. With the default domain that means:
+  `mach2.disyepd.com.pem`, `mach2.disyepd.com.key`, and
+  `mach2.disyepd.com-chain.pem`.
+- `secrets/mock-notification-receiver/dezi/`: if you want the receiver-side
+  DEZI login and sender-data pull flow to work, place
+  `certificaat_SYS_DEZI.crt` and `sleutel_SYS_DEZI.key` there.
+- `services/mock-notification-receiver/.env`: verify
+  `MOCK_RECEIVER_DEZI_CLIENT_ID`, `MOCK_RECEIVER_PUBLIC_ROOT`, and
+  `MOCK_RECEIVER_DEZI_CALLBACK_PATH` match the registered DEZI client.
+- when `COMPOSE_PROFILES=caddy` and `CADDYFILE_NAME=Caddyfile`, provide
+  `secrets/cloudflare_api_token`; for local-only HTTPS use `Caddyfile.local`
+  instead.
 
-Bash:
+Review these files before starting the stack:
 
-```bash
-cp start-stack/iti-91.conf.example start-stack/iti-91.conf
-cp start-stack/.env.example start-stack/.env
-```
+- `start-stack/.env`
+- `start-stack/iti-91.conf`
+- `services/iti-90/.env.Docker`
+- `services/mock-notification-receiver/.env`
+- `SECRETS.md`
 
-PowerShell:
-
-```powershell
-Copy-Item start-stack/iti-91.conf.example start-stack/iti-91.conf
-Copy-Item start-stack/.env.example start-stack/.env
-```
-
-2. Start the full stack.
+Start the stack:
 
 ```bash
 cd start-stack
 docker compose up -d
 ```
 
-The first boot can take a few minutes because Postgres and the three HAPI
-servers must become healthy before the application services and seed jobs can
-finish.
-
-3. Verify expected success state.
+Verify the default boot state:
 
 ```bash
 docker compose ps --all
 curl http://localhost:8509/health
 curl http://localhost:8000/health
+curl http://localhost:8001/health
+curl http://localhost:8002/health
 curl 'http://localhost:8080/fhir/Organization?_summary=count&_count=1'
 curl 'http://localhost:8082/fhir/Task?_summary=count&_count=1'
 ```
 
-Expected:
+Expected by default:
 
 - long-running services are `Up`
-- one-shot seed jobs `iti-130-publisher` and `notifiedpull-seed` complete as
-  `Exited (0)`
-- ITI-91 and ITI-90 health endpoints return HTTP `200`
-- the directory FHIR server returns seeded demo content (default stack: 13
-  `Organization` resources)
-- the notified-pull FHIR server contains seeded demo data (default stack: 1
-  `Task`)
-- API docs are reachable at <http://localhost:8509/docs> and <http://localhost:8000/docs>
+- one-shot jobs `iti-130-publisher` and `notifiedpull-seed` end as `Exited (0)`
+- the directory FHIR store contains the seeded ITI-130 demo data
+- the notified-pull FHIR store contains the seeded workflow `Task`
 
-## Current repository state
+## Specs And Docs
 
-The repository started from reference implementations, but parts have evolved
-into PoC-specific implementations:
+- Stack startup and operations: [`start-stack/README.md`](start-stack/README.md)
+- Secret layout and test certificates: [`SECRETS.md`](SECRETS.md)
+- Nuts TLS certificate notes:
+  [`services/nuts-node/certs/create_fake_UZI_cert.md`](services/nuts-node/certs/create_fake_UZI_cert.md)
+- ITI-90 service docs: [`services/iti-90/README.md`](services/iti-90/README.md)
+- ITI-91 service docs: [`services/iti-91/README.md`](services/iti-91/README.md)
+- ITI-91 architecture notes: [`services/iti-91/docs/README.md`](services/iti-91/docs/README.md)
+- ITI-130 service docs: [`services/iti-130/README.md`](services/iti-130/README.md)
+- Mock receiver docs: [`services/mock-notification-receiver/README.md`](services/mock-notification-receiver/README.md)
+- Sender gateway docs: [`services/sender-bgz-gateway/README.md`](services/sender-bgz-gateway/README.md)
 
-- `services/iti-91` (ITI-91 update client) is no longer only a pure reference:
-  it includes PoC-oriented extensions such as directory registry persistence,
-  resilient sync behavior, and additional operational controls.
-- `services/iti-90` is a PoC-focused address book proxy with BgZ workflow helpers.
-- `services/iti-130` is a publisher utility for feeding source data into the
-  directory model.
-- `poc9-start-stack` is the main Docker Compose stack for running the full PoC.
+## Operational Notes
 
-For ITI-91 specifics and current PoC settings, see
-[`services/iti-91/README.md`](services/iti-91/README.md).
-
-## IHE transaction scope
-
-This repository covers these IHE mCSD transactions:
-
-- [ITI-90: Find Matching Care Services](https://profiles.ihe.net/ITI/mCSD/ITI-90.html)
-- [ITI-91: Request Care Services Update](https://profiles.ihe.net/ITI/mCSD/ITI-91.html)
-- [ITI-130: Care Services Feed](https://profiles.ihe.net/ITI/mCSD/ITI-130.html)
-
-## PoC scope (sending party)
-
-For PoC 8/9 Route 9, this repository focuses on the sending-party role in an
-MSZ-to-MSZ BgZ referral flow, using GF Adressering with TA Routering.
-
-Core capabilities in scope:
-
-- mCSD directory publication and synchronization
-- address book search/discovery for organizations, org units, and endpoints
-- capability-based endpoint selection for BgZ routing
-- sender-side notified-pull task composition for PoC flows
-
-Technical baseline:
-<https://nuts-foundation.github.io/nl-generic-functions-ig/care-services.html>
-
-## Documentation map
-
-- Full-stack startup and operations: [`poc9-start-stack/README.md`](poc9-start-stack/README.md)
-- ITI-91 service overview and PoC settings: [`services/iti-91/README.md`](services/iti-91/README.md)
-- ITI-91 architecture details: [`services/iti-91/docs/README.md`](services/iti-91/docs/README.md)
-- ITI-130 usage details: [`services/iti-130/README.md`](services/iti-130/README.md)
-- ITI-90 usage details: [`services/iti-90/README.md`](services/iti-90/README.md)
-
-## Operational notes
-
-- `start-stack` is the canonical way to run this repository locally. The
-  service-level READMEs explain internals and standalone usage, but they assume
-  the stack README for the end-to-end boot sequence.
-- The default ITI-91 config points to the external test LRZa
-  `https://knooppunt-test.nuts-services.nl/lrza/mcsd`. The service can be
-  healthy while individual background sync attempts still log validation or
-  interoperability errors from external directories.
-- In this Compose setup Postgres is not mounted to a named volume. `docker
-  compose down` therefore removes the database container and resets stored FHIR
-  state for the next `up`.
-
-## Start the full stack
-
-From repository root:
-
-```bash
-cd start-stack
-docker compose up -d
-```
-
-Main local endpoints:
-
-- ITI-91 API docs: <http://localhost:8509/docs>
-- ITI-90 API docs: <http://localhost:8000/docs>
-- Directory FHIR: <http://localhost:8080/fhir>
-- Update Client FHIR: <http://localhost:8081/fhir>
-- Notified Pull FHIR: <http://localhost:8082/fhir>
-- Postgres: `localhost:5432`
-- Redis: `localhost:16379`
-- Caddy HTTPS endpoint: <https://localhost:443> (only when profile `caddy` is enabled)
-
-For stack profiles/config/seeding details, see
-[`poc9-start-stack/README.md`](poc9-start-stack/README.md).
-
-## Configuration checklist
-
-Before starting the stack, verify:
-
-1. `start-stack/iti-91.conf`
-2. `start-stack/.env`
-3. `services/iti-90/.env.Docker`
-4. `secrets/cloudflare_api_token` (only when profile `caddy` is enabled)
-5. `SECRETS.md` for the central runtime secret layout (`secrets/<service>/...`)
-
-Template files to copy when needed:
-
-- `poc9-start-stack/iti-91.conf.example` -> `poc9-start-stack/iti-91.conf`
-- `poc9-start-stack/.env.example` -> `poc9-start-stack/.env`
-
-For the shared runtime secret layout and test certificate generation, see
-[`SECRETS.md`](SECRETS.md).
-
-## Disclaimer
-
-This project and associated code are provided for documentation, PoC, and
-demonstration purposes only.
-
-It is not production-ready and may contain omissions, simplifications, or
-incomplete security hardening. Mostly due to absence of authentication and authorization, these are out of scope for PoC 9 and thus make the repository unfit for full production purposes.
-
+- `start-stack` is the supported way to run the repo locally end-to-end.
+- The shipped `start-stack/.env.example` enables the `caddy` profile with
+  `Caddyfile.local`, which uses a local development certificate instead of the
+  Cloudflare-backed setup.
+- `start-stack/iti-91.conf` points ITI-91 at the external test LRZa
+  `https://knooppunt-test.nuts-services.nl/lrza/mcsd`, so `/health` can be
+  green while individual remote syncs still log interoperability issues.
+- Postgres is not mounted to a named volume in the Compose stack. A plain
+  `docker compose down` resets the stored FHIR state for the next run.
 
 ## Licensing
 
-- Code: MIT by default (see `LICENSE.md`), except where service-specific
-  licenses apply (for example `services/iti-91`).
-- Documentation: CC BY-SA 4.0 (see `LICENSES/CC-BY-SA-4.0.txt`).
-- Third-party dependencies: see `THIRD_PARTY_LICENSES.md` files per service.
+- Repository code: MIT by default, except where service-specific licenses apply
+- `services/iti-91`: EUPL-1.2 in that service folder
+- Documentation: CC BY-SA 4.0
+- Third-party dependencies: see service-level `THIRD_PARTY_LICENSES.md` files

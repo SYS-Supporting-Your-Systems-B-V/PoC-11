@@ -1,50 +1,63 @@
-# MCSD Update client
+# ITI-91 Architecture
 
-This document explains the architecture of the MCSD update client. For actual
-startup instructions in this repository, use
+This document explains the architecture of the update client in this
+repository. For startup and runtime configuration, use
 [`../README.md`](../README.md) and
-[`../../../poc9-start-stack/README.md`](../../../poc9-start-stack/README.md).
+[`../../../start-stack/README.md`](../../../start-stack/README.md).
 
-The MCSD update client updates FHIR resources that conform to the
-[mCSD specification](https://profiles.ihe.net/ITI/mCSD/volume-1.html#1-46-mobile-care-services-discovery-mcsd).
-This application is an implementation of
-[ITI-91](https://profiles.ihe.net/ITI/mCSD/ITI-91.html).
-
-It continuously polls one or more source directories for mCSD resources,
-rewrites internal references so they point to the addressing FHIR server, and
-then updates the transformed resources on that server.
+The service implements ITI-91-style update behavior for mCSD resources: it
+polls source directories, rewrites source-local ids and references, and writes
+the transformed resources into the configured update-client FHIR server.
 
 ```mermaid
-
 graph TD
-    A[Fhir Directory 1]
-    B[Fhir Directory 2]
-    
-    A <---|Polls for resources| C
-    B <---|Polls for resources| C
+    A[Source Directory 1]
+    B[Source Directory 2]
+    P[Provider / LRZa]
 
-    subgraph Component["mCSD Update Client"]
+    P -->|discovers endpoints| C
+    A -->|FHIR resources| C
+    B -->|FHIR resources| C
+
+    subgraph Component["ITI-91 Update Client"]
         C[Update Service]
-        E[mCSD FHIR API]
+        D[Registry + Resource Map DB]
+        E[Scheduler + Cleanup Logic]
     end
- 
-    C -->|Updates resources with modified references| D[Addressing FHIR Server]
-    E -->|"Search & Discovery (mCSD profiles, queries)"| D
-    
-    Users[Client / Referral Apps] -->|mCSD search requests| E
-    
+
+    C <--> D
+    E --> C
+    C -->|rewritten transaction bundles| F[Update-Client FHIR Server]
 ```
 
-## Update service
+## Core Flow
 
-The Update service polls one or more FHIR directories for new or updated
-resources. It compares incoming data with the addressing FHIR directory and
-decides which resources must be created, updated, or skipped. When an update is
-needed, it namespaces internal ids and references according to the source
-directory so ids do not collide and cross-resource references point to the
-addressing FHIR server.
+The service continuously synchronizes mCSD resources from one or more source
+directories into the configured update-client FHIR server:
 
-For instance, take the following Organization resource found in a directory:
+1. discover directory endpoints from config, file, and/or the registry database
+2. fetch changed resources from each source directory
+3. namespace source ids so multiple directories can coexist without collisions
+4. rewrite internal references so they point at the local update-client FHIR
+   server
+5. order related resources and submit them as transaction bundles
+
+The id and reference rewriting step is the core of the design. Source
+directories can each use their own local logical ids, so the update client has
+to namespace them before multiple directories can coexist safely in one target
+store.
+
+## Why Reference Rewriting Exists
+
+Without rewriting, two different source directories could both contain a local
+resource such as `Organization/1`. If both were copied into one aggregated
+target store unchanged, they would collide.
+
+The update client avoids that by namespacing ids per source directory and then
+rewriting internal references to point at the corresponding namespaced target
+resources.
+
+Example input from a source directory:
 
 ```json
 {
@@ -57,7 +70,7 @@ For instance, take the following Organization resource found in a directory:
 }
 ```
 
-In this case, the "id" is the original logical [id](https://build.fhir.org/resource-definitions.html#Resource.id) that the directory has assigned. While the reference of "partOf" points to another Organization resource within that directory. When this resource is updated to the addressing FHIR server, the id will be namespaced and the reference will be modified to point to the addressing FHIR server instead:
+Conceptual shape after rewriting:
 
 ```json
 {
@@ -65,48 +78,101 @@ In this case, the "id" is the original logical [id](https://build.fhir.org/resou
   "id": "directory-id-1",
   "name": "Good Health Clinic",
   "partOf": {
-    "reference": "http://addressing-fhir-server/Organization/directory-id-2"
+    "reference": "Organization/directory-id-2"
   }
 }
 ```
 
-This creates a consistent aggregated view across multiple source directories and
-avoids id conflicts between them.
+The exact target id format is implementation-specific, but the design goal is
+stable per-directory namespacing plus internally consistent rewritten
+references.
 
-### Polling for update
+## What The Service Stores
 
-The update service uses a polling mechanism to periodically check one or more
-FHIR directories for new or updated resources. When a resource change is
-detected, the client retrieves it, rewrites internal references, and then
-updates the transformed resource on the addressing server. The scheduler
-triggers this process at regular intervals.
+The code maintains local state for:
 
-It will take care of only fetching resources that have been created or updated since the last successful poll, using the `_lastUpdated` search parameter. This ensures that the update process is efficient and only processes new or changed data.
+- directory metadata and health status
+- ignored and deleted directory lifecycle flags
+- resource-map entries that track synchronized source-to-target resources
+- optional provider and provider-directory registry data
 
-As part of the polling process, the client can validate that the source
-directory supports the required mCSD resources and interactions by checking its
-CapabilityStatement at `/metadata`. If the directory does not meet those
-requirements, the client logs an error and skips updates for that directory.
+Those tables are what make the local admin endpoints and cleanup flows possible.
+They are also what let the service remember lifecycle state across runs instead
+of treating every sync as a stateless import.
 
-## mCSD FHIR API
+In other words, the database is part of the behavior, not just a cache. It is
+what lets the service remember:
 
-The system exposes a FHIR API that adheres to the mCSD specification, allowing clients to perform CRUD operations on supported resources. The API supports standard HTTP methods such as GET, POST, PUT, and DELETE, and returns responses in JSON format.
+- which providers were discovered or added manually
+- which directories are currently ignored, unhealthy, or deleted
+- which source resource became which target resource
+- enough lifecycle state to support cleanup and reprocessing decisions
 
-In a nutshell, mCSD is a standardized way to represent and exchange information about healthcare facilities, services, and providers using FHIR resources. It defines specific profiles and search parameters to ensure interoperability between different systems.
+## Runtime Components
 
-```mermaid
+Update path:
 
-flowchart LR
-    subgraph mCSD_Directory_Server["mCSD Directory (IHE mCSD over FHIR R4B)"]
-      FR[(Facility Registry<br>Organization+Location profiles)]
-      HWR[(Health Worker Registry<br>Practitioner+PractitionerRole profiles)]
-      HSD[(Health Service Directory<br>HealthcareService profile)]
-      REL[(OrgAffiliation<br>Admin Location Hierarchy)]
-      API2[/"FHIR REST API<br>+ mCSD Profiles & Required Searches"/]
-      FR --> API2
-      HWR --> API2
-      HSD --> API2
-      REL --> API2
-    end
+- the update service polls each configured directory
+- cache and HTTP retry layers reduce repeated lookups and transient failures
+- best-effort handling allows PoC runs to continue when a source directory is
+  imperfect rather than fully failing the whole process
 
-```
+That best-effort behavior is intentional. In this PoC, partial progress across
+multiple directories is usually more useful than rejecting the entire update
+cycle because one source is temporarily unhealthy or slightly non-conformant.
+
+Polling behavior:
+
+- the service fetches deltas from source directories rather than always doing a
+  full import
+- scheduler settings determine how often update and cleanup loops run
+- capability and profile checks are configurable, and the shipped PoC config is
+  intentionally tolerant rather than strict
+
+Background control:
+
+- the scheduler can start or stop background update runs
+- cleanup logic removes or archives directories that have been deleted or stayed
+  unhealthy for too long
+
+API surface:
+
+- health and version endpoints show service status
+- directory endpoints expose the current known directory set and metrics
+- registry endpoints allow provider refreshes and manual directory registration
+- scheduler endpoints expose background-run control and runner history
+
+## Discovery Inputs
+
+The current code can source directory endpoints from multiple places:
+
+- configured provider URLs
+- a local directories file
+- the directory-registry database
+
+That is one of the main differences from a minimal reference implementation. In
+this repo, directory discovery is part of the operational model, not just a
+static config file.
+
+## Scheduler And Lifecycle
+
+Two background loops matter:
+
+- the update scheduler, which keeps synchronizing directories
+- the cleanup scheduler, which processes stale, ignored, and deleted directory
+  lifecycle state
+
+This means the service is continuously maintaining both:
+
+- resource content in the target FHIR store
+- directory lifecycle state in its own persistence layer
+
+That lifecycle handling is what makes endpoints such as `/directory/health`,
+`/directory/all`, and the ignore-list routes meaningful.
+
+## Notes
+
+- CapabilityStatement checks are configurable and are disabled in the shipped
+  PoC config.
+- The service can sync from multiple directories and multiple provider URLs.
+- The current stack config uses the external test LRZa as a discovery source.

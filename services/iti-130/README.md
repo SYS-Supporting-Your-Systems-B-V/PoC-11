@@ -1,272 +1,501 @@
-# iti130_publisher.py – Gebruikshandleiding
+# ITI-130 Publisher
 
-Deze publisher leest ZBC/EPD-tabellen (o.a. kliniek, locatie, afdeling, endpoint en optioneel medewerker/inzet) en publiceert daaruit afgeleide mCSD/FHIR Directory resources naar een FHIR-server via een **transaction Bundle** (IHE **ITI‑130 Care Services Feed**).
+`iti130_publisher.py` reads SQL source tables and publishes derived mCSD/FHIR
+directory resources as an ITI-130 transaction bundle.
 
-De output bestaat (minimaal) uit:
+The script uses stable logical ids derived from source keys instead of requiring
+extra FHIR id columns in the database. In practice that means the same clinic,
+location, department, endpoint, practitioner, or practitioner assignment keeps
+the same logical FHIR id across repeated runs.
 
-- **Organization** (kliniek + afdeling als child-Organization)
-- **Location** (locatie)
-- **HealthcareService** (1:1 afgeleid van afdeling)
-- **Endpoint** (afgeleid van `tblEndpoint`)
-- Optioneel: **Provenance** (audit trail; per transaction bundle/chunk; default uit, alleen als `--include-provenance` aan staat; en alleen toegevoegd als er non-DELETE entries zijn)
-- Optioneel: **Practitioner** + **PractitionerRole** (medewerker + inzet)
+## What It Publishes
 
-> De logische FHIR ids zijn stabiel en worden afgeleid van de table keys (geen extra FhirId kolommen nodig), bijv. `org-kliniek-<id>`, `loc-<id>`, `ep-<id>`, `prac-<id>`, etc.
+Always:
 
----
+- `Organization`
+- `Location`
+- `HealthcareService`
+- `Endpoint`
 
-## Rol in deze repository
+Optional:
 
-In de volledige stack van deze repository draait deze publisher als de
-eenmalige Compose job `iti-130-publisher` uit
-[`../../poc9-start-stack/docker-compose.yaml`](../../poc9-start-stack/docker-compose.yaml).
-De standaard containercommand:
+- `Practitioner`
+- `PractitionerRole`
+- `Provenance`
 
-- gebruikt `SQL_CONN=sqlite:///demo.db`
-- publiceert naar `FHIR_BASE=http://hapi-directory:8080/fhir`
-- forceert een lokale demo-reset met `--sqlite-reset-seed` en
-  `--fhir-reset-seed`
-- publiceert practitioners mee met `--include-practitioners`
+The publisher models departments in two ways:
 
-Daarom is `Exited (0)` na `docker compose up -d` voor deze container de
-verwachte successtatus, niet een fout.
+- as child `Organization` resources under the clinic organization
+- as `HealthcareService` resources derived 1:1 from department rows
 
-Wil je dezelfde seed-run opnieuw uitvoeren binnen de stack:
+That distinction matters when reading the generated bundle: the department
+organization exists for directory structure, while the `HealthcareService`
+represents the service offering itself.
+
+## Source Tables
+
+The publisher expects the ZBC/EPD-style tables used in this repo:
+
+- `tblKliniek`
+- `tblKliniekLocatie`
+- `tblLocatie`
+- `tblAfdeling`
+- `tblEndpoint`
+- optional practitioner tables: `tblMedewerker`, `tblMedewerkerinzet`,
+  `tblRoldefinitie`
+
+Endpoint rows can be clinic-level, location-level, or department-level. If a
+source endpoint row has no explicit `payloadType*` values, the publisher can
+fall back to configured defaults via `--default-endpoint-payload`.
+
+The shipped SQLite demo seed does not rely on that fallback. It creates four
+explicit endpoint rows for BGZ, notification, OAuth, and ITI-91 directory
+capabilities.
+
+## Role In This Repository
+
+In the local stack this service runs as the one-shot Compose job
+`iti-130-publisher` defined in
+[`../../start-stack/docker-compose.yaml`](../../start-stack/docker-compose.yaml).
+
+The image defaults are:
+
+- `SQL_CONN=sqlite:///demo.db`
+- `FHIR_BASE=http://hapi-directory:8080/fhir`
+- entrypoint: `python iti130_publisher.py`
+- default command:
+  `--profile-set nl --sqlite-reset-seed --include-practitioners --fhir-reset-seed`
+
+`Exited (0)` after `docker compose up -d` is the expected success state for
+this container. The publisher is a seed/sync job, not a long-running API
+service.
+
+Re-run the seed job from the repo root:
 
 ```bash
 docker compose -f start-stack/docker-compose.yaml run --rm iti-130-publisher
 ```
 
-## Vereisten
+## Requirements
 
-- Python 3.11
-- **Verplichte dependencies** (altijd nodig): `pydantic`, `pydantic-settings`, `requests`, `urllib3`
-- Voor **SQLite** kan het script draaien zonder SQLAlchemy (valt terug op de ingebouwde `sqlite3` module).
-- Voor **MS SQL Server** gebruikt het script bij voorkeur **SQLAlchemy** met een MSSQL driver (bijv. `mssql+pytds://...` of via `pyodbc`).
-Als SQL_CONN mssql+pytds gebruikt dan is dit in requirements.txt nodig: python-tds
-Als SQL_CONN ODBC connection string of mssql+pyodbc gebruikt dan is dit in requirements.txt nodig: pyodbc
-
-Lokale installatie:
+The container image for this service uses Python 3.11. For local runs, install
+the repo requirements from this service directory:
 
 ```bash
 python -m venv .venv
-. .venv/bin/activate   # Windows: .venv\Scripts\activate
+. .venv/bin/activate
 pip install -r requirements.txt
 ```
 
----
+The repo requirements include the pieces needed for:
 
-## Snel starten
+- SQLite demo runs
+- HTTP publishing with `requests`
+- SQLAlchemy-based database access
+- MSSQL access through `sqlalchemy-pytds` / `python-tds`
 
-### 1) SQLite (demo / lokaal testen)
+## Quick Start
 
-```bash
-python iti130_publisher.py \
-  --sql-conn sqlite:///demo.db \
-  --fhir-base https://fhir.example.org/fhir \
-  --dry-run \
-  --out bundle.json
-```
-
-- Bij SQLite initialiseert het script automatisch een klein schema (en seed data als de tabellen leeg zijn).
-- Gebruik `--sqlite-reset-seed` (of env `SQLITE_RESET_SEED=1`) om bestaande demo data te wissen en de seed opnieuw aan te maken.
-
-#### Seed data (alleen SQLite demo)
-
-Wanneer je `--sql-conn sqlite:///...` gebruikt, initialiseert het script (als de tabellen leeg zijn) **automatisch demo seed data**. Dit gebeurt alleen als `tblKliniek` nog geen records bevat.
-
-Wil je de demo-seed forceren (bijv. nadat je zelf testdata hebt toegevoegd), gebruik dan:
+Dry-run against the built-in SQLite demo:
 
 ```bash
 python iti130_publisher.py \
   --sql-conn sqlite:///demo.db \
   --sqlite-reset-seed \
-  --fhir-base https://fhir.example.org/fhir \
+  --fhir-base http://localhost:8080/fhir \
   --dry-run \
   --out bundle.json
 ```
 
-Of via environment variabele (handig in CI):
-
-```bash
-export SQLITE_RESET_SEED=1
-```
-
-> **Let op:** dit is **destructief** voor het opgegeven SQLite bestand: het verwijdert alle rijen uit de demo-tabellen (`tblKliniek`, `tblLocatie`, `tblAfdeling`, `tblEndpoint`, en bij practitioners ook `tblMedewerker*`/`tblRoldefinitie`).
-
-De seed is bedoeld voor **lokaal testen** en bestaat uit één demo kliniek met één locatie, twaalf afdelingen en twee endpoints (FHIR API + Nuts OAuth2). Daarnaast wordt één medewerker + inzet + roldefinitie gevuld (alleen relevant als je `--include-practitioners` gebruikt).
-
-**Kliniek (tblKliniek → Organization)**
-
-| Veld | Waarde |
-|---|---|
-| kliniekkey | `1` |
-| naam | `ZBC Demo Kliniek` |
-| URA | `00700700` |
-| AGB | `00000000` |
-| KvK | `12345678` |
-| Actief | `1` |
-| Adres | Demo Straat 1, 1011AA Amsterdam (NL) |
-| Type | `Healthcare Provider` |
-| Telefoon / email / website | `+31-20-0000000`, `info@demo.invalid`, `https://demo.invalid` |
-
-→ FHIR id: `Organization/org-kliniek-1`
-
-**Locatie (tblLocatie → Location)**
-
-| Veld | Waarde |
-|---|---|
-| locatiekey | `10` |
-| naam | `Demo Locatie` |
-| Type | `Hospital` |
-| Actief | `1` |
-| Adres | Locatie Straat 10, 1011AA Amsterdam (NL) |
-| GPS | `52.3702`, `4.8952` |
-| AGB | `00000000` |
-
-→ FHIR id: `Location/loc-10`  
-→ Relatie met kliniek via `tblKliniekLocatie (1 ↔ 10)`
-
-**Afdelingen (tblAfdeling → Organization + HealthcareService)**
-
-| afdelingkey | naam | Kliniek | Locatie | Specialisme (SNOMED) | Actief |
-|---|---|---|---|---|---|
-| `100` | `Beweegpoli` | `1` | `10` | `1251536003` (*Sport medicine*) | `1` |
-| `101` | `Dermatologie (huidziekten)` | `1` | `10` | `394582007` (*Dermatology*) | `1` |
-| `102` | `Interne geneeskunde` | `1` | `10` | `419192003` (*Internal medicine*) | `1` |
-| `103` | `Leefstijl coaching` | `1` | `10` | `722164000` (*Dietetics and nutrition*) | `1` |
-| `104` | `Orthopedie` | `1` | `10` | `394801008` (*Trauma & orthopaedics*) | `1` |
-| `105` | `Penispoli` | `1` | `10` | `394612005` (*Urology*) | `1` |
-| `106` | `Plastische chirurgie` | `1` | `10` | `394611003` (*Plastic surgery*) | `1` |
-| `107` | `Proctologie (anus problemen)` | `1` | `10` | `408464004` (*Colorectal surgery*) | `1` |
-| `108` | `Reumatologie (ontstekingen gewrichten)` | `1` | `10` | `394810000` (*Rheumatology*) | `1` |
-| `109` | `Spatader- & wondzorg (vaatchirurgie en dermatologie)` | `1` | `10` | `408463005` (*Vascular surgery*) | `1` |
-| `110` | `Vasectomie/sterilisatie` | `1` | `10` | `394612005` (*Urology*) | `1` |
-| `111` | `Vulvapoli (derma en gynaecologie)` | `1` | `10` | `394586005` (*Gynaecology*) | `1` |
-
-→ FHIR ids (per afdelingkey): `Organization/org-afdeling-{key}` en `HealthcareService/svc-afdeling-{key}`
-**Endpoint (tblEndpoint → Endpoint)**
-
-**FHIR API endpoint (kliniekniveau)**
-
-| Veld | Waarde |
-|---|---|
-| endpointkey | `900` |
-| Kliniek | `1` |
-| Status | `active` |
-| Address | `https://mach2.disyepd.com/notifiedpull/fhir` |
-| ConnectionType | HL7 FHIR REST |
-| payloadType* | *(leeg; publisher past defaults toe)* |
-| payloadMimeType | `application/fhir+json` |
-
-→ FHIR id: `Endpoint/ep-900`
-
-**OAuth endpoint (nuts-node)**
-
-| Veld | Waarde |
-|---|---|
-| endpointkey | `901` |
-| Kliniek | `1` |
-| Status | `active` |
-| Address | `https://mach2.disyepd.com/nuts-oauth2` |
-| ConnectionType | Direct Project |
-| payloadTypeSystemUri | `http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities` |
-| payloadTypeCode | `Nuts-OAuth` |
-| payloadTypeDisplay | `Nuts OAuth endpoint` |
-
-→ FHIR id: `Endpoint/ep-901`
-
-> Let op: in de seed zijn bij endpoint `900` de `payloadType*` velden bewust leeg gelaten zodat de publisher zijn default payload types toepast (standaard o.a. **BGZ Server** en **mCSD ITI-91**). Gebruik `--default-endpoint-payload` om dit te overschrijven.
-
-**Practitioner seed (alleen bij `--include-practitioners`)**
-
-- `tblRoldefinitie`: `doctor` / “Doctor”
-- `tblMedewerker`: `medewerkerkey=1000` (Dr. John Smith), BIG `12345678901`, AGB zorgverlener `99999999`, default locatie `10`
-- `tblMedewerkerinzet`: `inzetkey=5000` koppelt medewerker `1000` aan afdeling `100` (Beweegpoli), start `2020-01-01`, rol `doctor`
-
-**Relaties (kort)**
-
-```
-Organization/org-kliniek-1
- ├─ Endpoint/ep-900
- ├─ Endpoint/ep-901
- ├─ Location/loc-10
- │   └─ Organization/org-afdeling-100
- │       └─ HealthcareService/svc-afdeling-100
- │           └─ (optioneel) Practitioner/prac-1000 → PractitionerRole/pracrole-5000
-```
-
-
-### 2) MS SQL Server
+Publish to a server with a bearer token:
 
 ```bash
 python iti130_publisher.py \
   --sql-conn "mssql+pytds://user:pass@host:1433/DBNAME" \
   --fhir-base https://fhir.example.org/fhir \
-  --token "YOUR_BEARER_TOKEN"
+  --token YOUR_BEARER_TOKEN
 ```
 
-### 3) OAuth2 client_credentials i.p.v. een vast bearer token
+Publish with OAuth2 client credentials instead of a static bearer token:
 
 ```bash
 python iti130_publisher.py \
   --sql-conn "mssql+pytds://user:pass@host:1433/DBNAME" \
   --fhir-base https://fhir.example.org/fhir \
   --oauth-token-url https://auth.example.org/oauth/token \
-  --oauth-client-id "client-id" \
-  --oauth-client-secret "client-secret" \
+  --oauth-client-id client-id \
+  --oauth-client-secret client-secret \
   --oauth-scope "scope-a scope-b"
 ```
 
+Use `--fhir-reset-seed` only against disposable environments. It wipes existing
+directory resources before publishing.
 
----
+## SQLite Demo Seed
 
-## Wat moet je instellen (1A t/m 1G)
+When `SQL_CONN` points at SQLite, the script can initialize and seed a local
+demo database. The seed is inserted only when the tables are empty, or when you
+force a reset with `--sqlite-reset-seed`.
 
-Hieronder een praktische checklist van de belangrijkste instellingen voor het publiceren van organisatiegegevens naar een Administration Directory (FHIR server) via ITI‑130.
+`--sqlite-reset-seed` is destructive for the selected SQLite database. It
+deletes the existing demo rows and recreates the built-in seed.
 
-### A) Waar publiceer je naartoe? `--fhir-base`
+The shipped seed inserts data for:
 
-- Stel `--fhir-base` (of env `FHIR_BASE`) in op de base URL van de FHIR server die jullie **Administration Directory** vormt en transaction Bundles accepteert.
-- Gebruik bij voorkeur `https://...` (in `--production` mode is `http://` niet toegestaan).
+- 1 clinic row
+- 1 location row
+- 1 clinic-location link
+- 12 department rows
+- 4 endpoint rows
+- 1 practitioner row
+- 1 practitioner-role definition row
+- 1 practitioner assignment row
 
-### B) Waar komt de brondata vandaan? `--sql-conn`
+When published with the stack defaults (`--include-practitioners` enabled), that
+produces:
 
-- Stel `--sql-conn` (of env `SQL_CONN`) in op de database waarin de bron-tabellen/views staan (`tblKliniek`, `tblLocatie`, `tblAfdeling`, `tblEndpoint`, `tblKliniekLocatie`, ...).
-- `tblKliniekLocatie` is de koppeltabel tussen klinieken en locaties en is vereist om de juiste relaties te leggen.
-- Voor DiSy kun je desgewenst views maken met deze namen/kolommen zodat het script zonder codewijziging kan draaien.
+| Resource type | Count | Notes |
+| --- | --- | --- |
+| `Organization` | 13 | 1 clinic + 12 department organizations |
+| `Location` | 1 | `tblLocatie` row `10` |
+| `HealthcareService` | 12 | 1 per department |
+| `Endpoint` | 4 | endpoint keys `900`, `901`, `902`, `903` |
+| `Practitioner` | 1 | only published with `--include-practitioners` |
+| `PractitionerRole` | 1 | only published with `--include-practitioners` |
 
-### C) Authenticatie / TLS naar de FHIR server
+That is why the stack verification expects 13 `Organization` resources in the
+directory FHIR store.
 
-Kies één van de volgende opties (afhankelijk van de directory):
+## Seeded Records
 
-- Bearer token: `--token` (of env `FHIR_TOKEN`)
-- OAuth2 client_credentials: `--oauth-token-url`, `--oauth-client-id`, `--oauth-client-secret` (en optioneel `--oauth-scope`)
-- Mutual TLS: `--mtls-cert` en optioneel `--mtls-key`
-- Alleen voor test: `--no-verify-tls` (niet aanbevolen; wordt error in `--production`)
+### Clinic
 
-### D) NL GF profielen en identifiers
+`tblKliniek` seeds one clinic that becomes
+`Organization/org-kliniek-1`.
 
-- Voor NL Generic Functions (GF) Adressering gebruik je doorgaans:
-  - `--include-meta-profile`
-  - `--profile-set nl` (default is `nl`)
-- Zet `--assigned-id-system-base` op een eigen, stabiele URI namespace (niet de default `https://sys.local/identifiers`).
-- Zorg dat de URA bepaald kan worden via `tblKliniek.uranummer` of gebruik `--default-ura` als fallback.
+| Field | Value |
+| --- | --- |
+| `kliniekkey` | `1` |
+| Name | `ZBC Demo Kliniek` |
+| URA | `00700700` |
+| AGB | `00000000` |
+| KvK | `12345678` |
+| Active | `1` |
+| Phone | `+31-20-0000000` |
+| Email | `info@demo.invalid` |
+| Website | `https://demo.invalid` |
+| Address | `Demo Straat 1, 1011AA Amsterdam, NL` |
+| Type | `prov / Healthcare Provider` |
 
-### E) Endpoints (vindbaarheid & routering)
+### Location
 
-- Vul `tblEndpoint` met de technische endpoints die andere partijen moeten kunnen vinden:
-  - `adres` (wordt `Endpoint.address`) is verplicht en moet een URL zijn.
-  - `status`/`actief`/`ingangsdatum`/`einddatum` bepalen of het endpoint effectief “active” is.
-  - `payloadType*` bepaalt waarvoor het endpoint bedoeld is (bijv. BgZ).
-- Als `payloadType*` leeg is, gebruikt het script standaard **twee** default payload types: BGZ Server capabilities én mCSD ITI-91 capabilities (`nl-gf-admin-directory-update-client`). Dit is te overschrijven met `--default-endpoint-payload`.
+`tblLocatie` seeds one location that becomes `Location/loc-10`. The linking
+table `tblKliniekLocatie` connects clinic `1` to location `10`.
 
-#### Voorbeeld: BGZ Server capabilities invullen in `tblEndpoint` (MS SQL)
+| Field | Value |
+| --- | --- |
+| `locatiekey` | `10` |
+| Name | `Demo Locatie` |
+| AGB | `00000000` |
+| Active | `1` |
+| Phone | `+31-20-1111111` |
+| Email | `locatie@demo.invalid` |
+| Address | `Locatie Straat 10, 1011AA Amsterdam, NL` |
+| Coordinates | `52.3702, 4.8952` |
+| Type | `HOSP / Hospital` |
 
-Voor BGZ (MSZ/BgZ use case) hoort `Endpoint.payloadType` een coding te bevatten uit de NL GF *Data exchange capabilities* codeset.
-Vul daarvoor in de brondata (dbo.`tblEndpoint`) de kolommen `payloadTypeSystemUri`, `payloadTypeCode` en `payloadTypeDisplay`.
+### Departments
 
-Voorbeeld (update één bestaand endpoint):
+Each seeded department becomes:
+
+- `Organization/org-afdeling-{afdelingkey}`
+- `HealthcareService/svc-afdeling-{afdelingkey}`
+
+| `afdelingkey` | Name | `kliniekkey` | `locatiekey` | Specialty | Service type |
+| --- | --- | --- | --- | --- | --- |
+| `100` | `Beweegpoli` | `1` | `10` | `1251536003 / Sport medicine` | `491 / Exercise Physiology` |
+| `101` | `Dermatologie (huidziekten)` | `1` | `10` | `394582007 / Dermatology` | `168 / Dermatology` |
+| `102` | `Interne geneeskunde` | `1` | `10` | `419192003 / Internal medicine` | `382 / Medical Services` |
+| `103` | `Leefstijl coaching` | `1` | `10` | `722164000 / Dietetics and nutrition` | `553 / 1-on-1 Support /Mentoring /Coaching` |
+| `104` | `Orthopedie` | `1` | `10` | `394801008 / Trauma & orthopaedics` | `218 / Orthopaedic Surgery` |
+| `105` | `Penispoli` | `1` | `10` | `394612005 / Urology` | `222 / Urology` |
+| `106` | `Plastische chirurgie` | `1` | `10` | `394611003 / Plastic surgery` | `220 / Plastic & Reconstructive Surgery` |
+| `107` | `Proctologie (anus problemen)` | `1` | `10` | `408464004 / Colorectal surgery` | `221 / Surgery - General` |
+| `108` | `Reumatologie (ontstekingen gewrichten)` | `1` | `10` | `394810000 / Rheumatology` | `182 / Rheumatology` |
+| `109` | `Spatader- & wondzorg (vaatchirurgie en dermatologie)` | `1` | `10` | `408463005 / Vascular surgery` | `223 / Vascular Surgery` |
+| `110` | `Vasectomie/sterilisatie` | `1` | `10` | `394612005 / Urology` | `54 / Family Planning` |
+| `111` | `Vulvapoli (derma en gynaecologie)` | `1` | `10` | `394586005 / Gynaecology` | `567 / Women's Health Clinic` |
+
+### Endpoints
+
+The shipped SQLite seed creates four clinic-level endpoints, all attached to
+clinic `1` and therefore published with logical ids `Endpoint/ep-900` through
+`Endpoint/ep-903`.
+
+| Endpoint key | Name | Address | Connection type | Payload type | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `900` | `FHIR API` | `https://mach2.disyepd.com/notifiedpull/fhir` | `hl7-fhir-rest / HL7 FHIR REST` | `BGZ Server` | BGZ server endpoint |
+| `901` | `Nuts OAuth2` | `https://mach2.disyepd.com/nuts-oauth2/oauth2/00700700` | `direct-project / Direct Project` | `Nuts-OAuth` | Authentication server endpoint |
+| `902` | `Mock Notification Receiver` | `https://mach2.disyepd.com/receiver-mock/fhir` | `hl7-fhir-rest / HL7 FHIR REST` | `Twiin TA Notification endpoint` | Notification receiver used in local sender-flow testing |
+| `903` | `Administration Directory` | `https://mach2.disyepd.com/fhir` | `hl7-fhir-rest / HL7 FHIR REST` | `Care Services Directory for Update Client` | ITI-91 discovery/update capability |
+
+Unlike the older version of this README, the current seed does not leave the
+payload type empty for the main FHIR endpoint. All four seeded endpoints define
+their payload types explicitly.
+
+### Practitioner Data
+
+The SQLite seed also inserts practitioner rows. They are only published as FHIR
+resources when `--include-practitioners` is enabled.
+
+`tblRoldefinitie`:
+
+- key `1`
+- code `doctor`
+- display `Doctor`
+
+`tblMedewerker` becomes `Practitioner/prac-1000`:
+
+| Field | Value |
+| --- | --- |
+| `medewerkerkey` | `1000` |
+| Display name | `Dr. John Smith` |
+| BIG | `12345678901` |
+| AGB zorgverlener | `99999999` |
+| Default location | `10` |
+| Email | `john.smith@demo.invalid` |
+| Mobile | `+31-6-12345678` |
+| Gender | `male` |
+| Birth date | `1980-05-12` |
+
+`tblMedewerkerinzet` becomes `PractitionerRole/pracrole-5000`:
+
+| Field | Value |
+| --- | --- |
+| `medewerkerinzetkey` | `5000` |
+| Practitioner | `1000` |
+| Department | `100` (`Beweegpoli`) |
+| Role definition | `1` (`doctor`) |
+| Start date | `2020-01-01` |
+| Active | `1` |
+
+## Resulting FHIR Relationships
+
+The current publisher logic creates the following relationship shape:
+
+- `Organization/org-kliniek-1` is the top-level clinic organization.
+- `Location/loc-10` uses `managingOrganization -> Organization/org-kliniek-1`.
+- `Organization/org-afdeling-{id}` uses `partOf -> Organization/org-kliniek-1`.
+- `HealthcareService/svc-afdeling-{id}` uses
+  `providedBy -> Organization/org-kliniek-1`.
+- `HealthcareService/svc-afdeling-{id}` links to `Location/loc-10`.
+- `PractitionerRole/pracrole-5000` links the practitioner, department
+  organization, location, and healthcare service.
+
+One detail that is easy to miss: the healthcare service is not published as
+"provided by the department organization". It is published as provided by the
+clinic organization, while the department still exists separately as a child
+organization in the directory.
+
+Representative references from the shipped seed:
+
+```text
+Organization/org-kliniek-1
+  endpoint -> Endpoint/ep-900, Endpoint/ep-901, Endpoint/ep-902, Endpoint/ep-903
+
+Location/loc-10
+  managingOrganization -> Organization/org-kliniek-1
+
+Organization/org-afdeling-100
+  partOf -> Organization/org-kliniek-1
+
+HealthcareService/svc-afdeling-100
+  providedBy -> Organization/org-kliniek-1
+  location -> Location/loc-10
+
+PractitionerRole/pracrole-5000
+  practitioner -> Practitioner/prac-1000
+  organization -> Organization/org-afdeling-100
+  location -> Location/loc-10
+  healthcareService -> HealthcareService/svc-afdeling-100
+  endpoint -> clinic/location/department endpoint union
+```
+
+In the shipped SQLite seed, all four endpoints are clinic-level endpoints, so
+the practitioner role ultimately inherits those clinic endpoints.
+
+## Main CLI Options
+
+Required inputs:
+
+- `--sql-conn` or `SQL_CONN`
+- `--fhir-base` or `FHIR_BASE`
+
+Auth and transport:
+
+- `--token`
+- `--oauth-token-url`
+- `--oauth-client-id`
+- `--oauth-client-secret`
+- `--oauth-scope`
+- `--mtls-cert`
+- `--mtls-key`
+- `--no-verify-tls`
+
+Publish shaping:
+
+- `--bundle-size`
+- `--since`
+- `--profile-set`
+- `--include-meta-profile`
+- `--include-meta-lastupdated`
+- `--include-meta-source`
+- `--include-provenance`
+- `--assigned-id-system-base`
+- `--default-ura`
+- `--publisher-ura`
+- `--publisher-source`
+- `--default-endpoint-payload`
+- `--bgz-policy`
+- `--include-practitioners`
+
+Safety and test helpers:
+
+- `--sqlite-reset-seed`
+- `--fhir-reset-seed`
+- `--delete-inactive`
+- `--allow-delete-endpoint`
+- `--dry-run`
+- `--out`
+- `--lenient`
+- `--production`
+
+HTTP behavior:
+
+- `--timeout`
+- `--connect-timeout`
+- `--http-retries`
+- `--http-backoff`
+- `--http-pool-connections`
+- `--http-pool-maxsize`
+- `--publish-delay`
+- `--max-retry-after`
+
+Observability:
+
+- `--log-level`
+- `--log-format`
+
+Use `python iti130_publisher.py --help` for the full flag descriptions.
+
+## Configuration Guidance
+
+The previous version of this README had more operational explanation here. That
+guidance is still useful, so this section keeps the practical "how do I choose
+these settings?" context instead of only listing flag names.
+
+### 1. Publish Target: `--fhir-base`
+
+Set `--fhir-base` to the base URL of the FHIR server that acts as the
+Administration Directory and accepts transaction bundles.
+
+- Use `https://...` for anything outside disposable local testing.
+- In `--production` mode, risky settings such as plain `http://` or
+  `--no-verify-tls` are treated as errors.
+- If you are publishing to the local stack, the default directory target is
+  `http://hapi-directory:8080/fhir` in Docker or `http://localhost:8080/fhir`
+  from the host.
+
+### 2. Source Data: `--sql-conn`
+
+Set `--sql-conn` to the database that exposes the source tables:
+`tblKliniek`, `tblKliniekLocatie`, `tblLocatie`, `tblAfdeling`, and
+`tblEndpoint`, plus optional practitioner tables when you use
+`--include-practitioners`.
+
+- For local testing, `sqlite:///demo.db` is the built-in demo path.
+- For MSSQL, the documented path in this repo is typically
+  `mssql+pytds://user:pass@host:1433/DBNAME`.
+- `tblKliniekLocatie` is important: it is the bridge that lets the publisher
+  link clinic, location, and downstream service resources correctly.
+- If your source system uses different physical table names, the intended
+  approach is to expose compatible views rather than rewriting the publisher.
+
+### 3. Authentication And TLS
+
+Choose one outbound authentication model for the target FHIR server:
+
+- bearer token with `--token`
+- OAuth2 client credentials with `--oauth-token-url`,
+  `--oauth-client-id`, `--oauth-client-secret`, and optionally
+  `--oauth-scope`
+- mutual TLS with `--mtls-cert` and optionally `--mtls-key`
+
+Operationally:
+
+- `--token` takes precedence over OAuth settings.
+- `--no-verify-tls` is only appropriate for disposable test setups.
+- If `--mtls-key` is omitted, `--mtls-cert` must contain both cert and private
+  key.
+
+### 4. NL GF Identifiers And URA
+
+For NL Generic Functions addressing, the URA is the leading organization
+identifier and is reused across the generated directory resources.
+
+The publisher determines the URA in this order:
+
+1. `--publisher-ura`
+2. source `URANummer` from the clinic row
+3. `--default-ura`
+
+That matters because the URA is used:
+
+- as an `Organization.identifier`
+- on `Location` and `HealthcareService` identifiers
+- as the assigner identity for the generated NL GF AssignedId identifiers
+
+Recommended settings:
+
+- keep `--profile-set nl` when you are publishing for the NL GF use case
+- set `--assigned-id-system-base` to a stable namespace you control instead of
+  leaving the placeholder default `https://sys.local/identifiers`
+- use `--publisher-ura` in PoC/test setups when you need to switch publisher
+  identity without changing source rows
+
+Normalization behavior in the current code:
+
+- a `URA:` prefix is stripped
+- a numeric URA shorter than 8 digits is left-padded with zeroes
+
+### 5. Endpoints, Payload Types, And BGZ Policy
+
+Endpoint rows drive discoverability and routing. In practice, the important
+fields are:
+
+- `adres` -> `Endpoint.address`
+- `status`, `actief`, `ingangsdatum`, `einddatum` -> effective endpoint status
+- `payloadType*` -> what the endpoint is for
+
+If a source endpoint row has no explicit `payloadType*` values, the current
+publisher falls back to two default payload codings:
+
+- BGZ Server capabilities
+- Care Services Directory for Update Client capabilities
+
+That fallback can be overridden with repeatable `--default-endpoint-payload`
+values using the format `system|code|display`.
+
+For BGZ-oriented runs, `--bgz-policy` controls how strict the sanity check is:
+
+- `per-clinic` is the current default
+- `per-afdeling` is stricter for department-level endpoint ownership
+- `per-afdeling-or-clinic` allows department services to inherit BGZ capability
+  from their clinic endpoint
+- `off` disables the BGZ-specific policy entirely
+
+If you want to populate BGZ payloads explicitly in MSSQL source data, the row
+shape is still:
 
 ```sql
 UPDATE dbo.tblEndpoint
@@ -276,78 +505,28 @@ SET payloadTypeSystemUri = 'http://nuts-foundation.github.io/nl-generic-function
 WHERE endpointkey = 900;
 ```
 
-Voorbeeld (bij het aanmaken van een nieuw endpoint record):
+### 6. Dry Runs, Chunking, And Destructive Flags
 
-```sql
-INSERT INTO dbo.tblEndpoint (
-    endpointkey, kliniekkey, locatiekey, afdelingkey,
-    status, connectionTypeSystemUri, connectionTypeCode, connectionTypeDisplay,
-    payloadTypeSystemUri, payloadTypeCode, payloadTypeDisplay, payloadMimeType,
-    adres, naam, telefoon, email,
-    ingangsdatum, einddatum, actief, LaatstGewijzigdOp
-) VALUES (
-    901, 1, NULL, NULL,
-    'active', 'http://terminology.hl7.org/CodeSystem/endpoint-connection-type', 'hl7-fhir-rest', 'HL7 FHIR REST',
-    'http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities', 'http://nictiz.nl/fhir/CapabilityStatement/bgz2017-servercapabilities', 'BGZ Server', 'application/fhir+json',
-    'https://fhir.example.org/fhir', 'FHIR API', '+31-20-0000000', 'fhir@example.org',
-    '2020-01-01', NULL, 1, SYSUTCDATETIME()
-);
-```
+Useful operational flags:
 
-> Tip: als je `payloadType*` leeg laat in je brondata, kun je ook via de CLI defaults zetten met `--default-endpoint-payload`.
-> Voor productie (en troubleshooting) is expliciet vullen in `tblEndpoint` meestal het duidelijkst.
+- `--dry-run` builds the bundle without posting it
+- `--out bundle.json` writes the dry-run bundle to disk
+- `--bundle-size` controls how many transaction entries are sent per chunk
+- `--sqlite-reset-seed` recreates the SQLite demo data
+- `--fhir-reset-seed` deletes existing directory resources before publishing
 
-### F) BGZ sanity policy (kan een run laten falen)
+Important behavior:
 
-- Met `--bgz-policy` bepaal je hoe strikt het script controleert dat er BGZ-capable endpoints aanwezig zijn.
-- Gebruik in de MSZ/BgZ use case meestal `per-clinic` (default) of, als jullie endpoints op afdelingsniveau zitten, `per-afdeling` / `per-afdeling-or-clinic`.
+- `--sqlite-reset-seed` is only for SQLite demo runs
+- `--fhir-reset-seed` is destructive and intended for disposable environments
+- `--fhir-reset-seed` is not allowed with `--production`
 
-### G) Testen zonder te posten
+### 7. Delta Publishing: `--since`
 
-- `--dry-run` print de transaction Bundle en doet geen POST.
-- `--out <bestand.json>` schrijft de Bundle naar een bestand (alleen in combinatie met `--dry-run`).
+`--since` is a publisher-side selection filter, not an ITI-130 protocol field.
+It tells the script to publish a best-effort delta since a UTC timestamp.
 
-
-## URA-nummer (UZI-register abonneenummer)
-
-Voor NL Generic Functions (GF) Adressering is de **URA** de leidende identificatie van de zorgorganisatie. Dit script gebruikt de URA daarom consequent in de Directory-resources.
-
-### Waar wordt de URA gebruikt?
-
-- In **Organization.identifier** met `system=http://fhir.nl/fhir/NamingSystem/ura`.
-- In **Location.identifier** en **HealthcareService.identifier** (naast de NL GF `identifier:AssignedId`).
-- In de `assigner` van de **NL GF AssignedId** identifiers (`identifier.assigner.identifier.system/value`), zodat zichtbaar is **welke organisatie** de author-assigned identifiers uitgeeft.
-
-### Waar komt de URA vandaan?
-
-- **Productie:** gebruik de URA van je zorgorganisatie zoals geregistreerd bij het **UZI-register** (deze staat o.a. op het UZI-servercertificaat / stamkaart).
-- **PoC/test:** vaak wordt een **fake URA** afgesproken. Gebruik dan `--publisher-ura` (of env `PUBLISHER_URA`) om deze te forceren zonder brondata te wijzigen.
-
-### Prioriteit / configuratie
-
-De URA wordt bepaald in deze volgorde:
-
-1. `--publisher-ura` (of `PUBLISHER_URA`) – **hard override** (aanrader voor PoC/test; maakt switch PoC↔prod mogelijk zonder DB-wijziging).
-2. `URANummer` in de brondata (`tblKliniek.uranummer`).
-3. `--default-ura` (of `DEFAULT_URA`) – fallback als brondata geen URA bevat.
-
-### Normalisatie
-
-- Een prefix `URA:` wordt gestript (bijv. `URA:12345` → `12345`).
-- Als de URA numeriek is en **korter dan 8 cijfers**, dan padt het script links met nullen tot 8 cijfers (bijv. `12345` → `00012345`).
-
-### Voor PoC 9 staat de URA in tblKliniek.uranummer en is poc9-sys-001.
-
-Alle gepubliceerde Organization/Location/HealthcareService resources gebruiken deze URA.
-
-
----
-
-## Delta publiceren met `--since`
-
-Met `--since` publiceer je **best‑effort alleen wijzigingen sinds een timestamp** (UTC, ISO‑format), in plaats van telkens alles opnieuw.
-
-Voorbeeld:
+Example:
 
 ```bash
 python iti130_publisher.py \
@@ -356,269 +535,91 @@ python iti130_publisher.py \
   --since 2025-12-30T12:00:00Z
 ```
 
-### Kanttekeningen bij `--since`
+Behavior to be aware of:
 
-- `--since` is **geen ITI‑130 protocol parameter**; het is puur een **publish-selectie** in dit script.
-- De selectie is grotendeels gebaseerd op `LaatstGewijzigdOp >= since`.
-- Voor **Endpoint** (en bij practitioners ook voor inzet/rollen) wordt daarnaast gekeken naar **StartDatum/EindDatum** die *tussen since en vandaag* vallen. Dat vangt “status flips” af die kunnen gebeuren zonder dat `LaatstGewijzigdOp` wijzigt.
-- Bij delta-publicatie kan het voorkomen dat een resource in de bundle verwijst naar een resource die **niet** in dezelfde run wordt meegestuurd (omdat die al eerder is gepubliceerd).  
-  In dat geval geeft de sanity check **warnings i.p.v. errors**.
-- Delta-publicatie blijft “best‑effort”: als bron-timestamps niet betrouwbaar zijn, of als er ingrijpende mapping-wijzigingen zijn, kan een periodieke **full publish** nodig zijn.
+- the selection is driven mainly by `LaatstGewijzigdOp >= since`
+- for endpoints, and for practitioner assignments when enabled, the script also
+  looks at start and end dates so status flips are not missed as easily
+- in delta mode, a published resource can reference another resource that is not
+  resent in the same run because that referenced resource was already published
+  earlier
+- because of that, sanity checking is more tolerant in delta mode than in full
+  runs
 
----
+## Environment Defaults
 
-## CLI gebruik
+CLI arguments override environment variables and `.env` values. The current
+`Settings` model reads these defaults:
 
-Algemene vorm:
+Core connection:
+
+- `SQL_CONN`
+- `FHIR_BASE`
+
+Reset helpers:
+
+- `SQLITE_RESET_SEED`
+- `FHIR_RESET_SEED`
+
+Authentication:
+
+- `FHIR_TOKEN`
+- `OAUTH_TOKEN_URL`
+- `OAUTH_CLIENT_ID`
+- `OAUTH_CLIENT_SECRET`
+- `OAUTH_SCOPE`
+
+Publish shaping:
+
+- `BUNDLE_SIZE`
+- `SINCE_UTC`
+- `PROFILE_SET`
+- `ASSIGNED_ID_SYSTEM_BASE`
+- `DEFAULT_URA`
+- `PUBLISHER_URA`
+- `INCLUDE_META_LASTUPDATED`
+- `INCLUDE_META_SOURCE`
+- `INCLUDE_PROVENANCE`
+- `PUBLISHER_SOURCE`
+- `BGZ_POLICY`
+
+mTLS:
+
+- `MTLS_CERT`
+- `MTLS_KEY`
+
+HTTP behavior:
+
+- `HTTP_TIMEOUT`
+- `HTTP_CONNECT_TIMEOUT`
+- `HTTP_RETRIES`
+- `HTTP_BACKOFF`
+- `HTTP_POOL_CONNECTIONS`
+- `HTTP_POOL_MAXSIZE`
+- `PUBLISH_DELAY_SECONDS`
+- `MAX_RETRY_AFTER_SECONDS`
+
+Logging:
+
+- `ITI130_LOG_LEVEL`
+- `ITI130_LOG_FORMAT`
+
+Some flags are intentionally CLI-only in the current implementation. If you
+need them, set them explicitly in the command or container entrypoint. The main
+examples are `--include-meta-profile`, `--include-practitioners`,
+`--delete-inactive`, `--allow-delete-endpoint`, `--lenient`,
+`--no-verify-tls`, and `--production`.
+
+## Tests
 
 ```bash
-python iti130_publisher.py [opties]
+pytest -vv tests
 ```
 
-Het script leest ook defaults uit environment variabelen en/of een `.env` bestand (CLI overrides environment).
+The test suite covers transaction bundle semantics, NL GF mapping, seeded
+endpoint behavior, and repo-specific PoC routing expectations.
 
----
+## Related Docs
 
-## CLI opties
-
-### Database & FHIR server
-
-- `--sql-conn`  
-  Database verbinding. SQLAlchemy URL (aanrader) zoals `sqlite:///pad.db` of `mssql+pytds://user:pass@host:1433/db`.  
-  Een “legacy” ODBC string zonder `://` kan ook, maar vereist `pyodbc`.
-
-- `--sqlite-reset-seed`  
-  **Alleen SQLite demo:** wis bestaande demo-data uit de SQLite database en maak de ingebouwde seed data opnieuw aan.  
-  (Destructief; bedoeld voor lokaal testen / CI. Alternatief: env `SQLITE_RESET_SEED=1`.)
-
-- `--fhir-reset-seed`  
-  Wis alle resources op de FHIR server voordat er gepubliceerd wordt.  
-  (Destructief; bedoeld voor lokaal testen / CI. Alternatief: env `FHIR_RESET_SEED=1`.)  
-  **Let op:** wordt geweigerd als `--production` aan staat.
-
-- `--fhir-base`  
-  Base URL van de FHIR server waar je transaction Bundles naar POST.
-
-### Authenticatie
-
-- `--token`  
-  Bearer token (heeft voorrang op OAuth instellingen).
-
-- `--oauth-token-url`  
-  OAuth2 token endpoint (client_credentials).
-
-- `--oauth-client-id`  
-  OAuth2 client id.
-
-- `--oauth-client-secret`  
-  OAuth2 client secret.
-
-- `--oauth-scope`  
-  OAuth scope(s) (optioneel).
-
-### TLS / mTLS
-
-- `--no-verify-tls`  
-  Zet TLS verificatie uit (niet aanbevolen; in `--production` mode wordt dit een error).
-
-- `--mtls-cert`  
-  Client certificaat (PEM). Als `--mtls-key` niet gezet is moet de private key hierin zitten.
-
-- `--mtls-key`  
-  Private key (PEM) voor mutual TLS.
-
-### Publicatiegedrag
-
-- `--bundle-size`  
-  Max aantal entries per transaction bundle. Grotere aantallen worden in meerdere transacties opgesplitst.  
-  (Default: `50`)
-  Let op: als er Provenance wordt toegevoegd, telt die mee als 1 extra entry binnen de bundle-size.
-
-- `--include-provenance`
-  Voeg per transaction bundle een **Provenance** resource toe (audit trail). (Default: uit)
-
-- `--no-provenance`
-  Voeg geen Provenance resources toe. (Default)
-
-- `--since`  
-  Publiceer alleen wijzigingen sinds deze UTC timestamp (ISO).
-
-- `--dry-run`  
-  Post niet naar de server; print de Bundle JSON naar stdout.
-
-- `--out`  
-  Schrijf Bundle JSON naar bestand (alleen met `--dry-run`).
-
-### Profielen / NL GF specifieke opties
-
-- `--include-meta-profile`  
-  Voeg `meta.profile` toe aan resources.
-
-- `--include-meta-lastupdated` / `--no-meta-lastupdated`  
-  Publiceer `resource.meta.lastUpdated` (afgeleid uit brondata timestamps). Standaard staat dit uit.
-
-- `--include-meta-source` / `--no-meta-source`  
-  Publiceer `resource.meta.source`. Standaard staat dit uit.
-
-- `--publisher-source`  
-  Stabiele absolute URI/URN voor `meta.source` (alleen gebruikt als `--include-meta-source` aan staat).  
-  Zonder `--publisher-source` gebruikt het script `assigned-id-system-base + '/iti130-publisher'` (fallback: `urn:uuid:<run-id>`).
-
-- `--profile-set {nl|ihe|none}`  
-  Welke profile set je declareert als `--include-meta-profile` aan staat.
-
-- `--assigned-id-system-base`  
-  Base URI voor author-assigned identifier systems (NL GF AssignedId slices).  
-  Voorbeeld: `https://example.org/identifiers`
-
-- `--default-ura`  
-  Fallback URA wanneer brondata geen URA bevat (of niet naar een kliniek URA te mappen is). Wordt gebruikt als er geen URA uit brondata of `--publisher-ura` te bepalen is.
-
-- `--publisher-ura` / `--ura`  
-  Hard override voor de URA van de publicerende zorgorganisatie. Handig voor PoC/test (fake URA) en om zonder DB-wijziging te switchen naar productie. Overschrijft `URANummer` uit de brondata.
-
-- `--default-endpoint-payload` (repeatable)  
-  Default `Endpoint.payloadType` wanneer de bronregel geen payloadType heeft.  
-  Formaat: `system|code|display`
-
-- `--bgz-policy {off|any|per-clinic|per-afdeling|per-afdeling-or-clinic}`  
-  Extra sanity policy voor BGZ endpoints.  
-  (Default: `per-clinic`)
-
-### Practitioners
-
-- `--include-practitioners`  
-  Publiceer ook Practitioner en PractitionerRole uit `tblMedewerker` en `tblMedewerkerinzet`.
-  Dit is buiten scope van de PoC en daarvoor dus niet vereist.
-
-### Delete policy
-
-- `--delete-inactive`  
-  Publiceer DELETE voor “inactieve” records i.p.v. PUT met `active=false`/`status=inactive`.
-
-- `--allow-delete-endpoint`  
-  Sta DELETE voor Endpoint toe als `--delete-inactive` aan staat (niet aanbevolen; NL GF adviseert meestal `Endpoint.status=off`).
-
-### Lenient mode
-
-- `--lenient`  
-  Schakel strict mapping uit: ontbrekende inputs geven warnings en veilige fallbacks/placeholder values.
-
-### HTTP tuning
-
-- `--timeout`  
-  HTTP read timeout in seconden. (Default: `30`)
-
-- `--connect-timeout`  
-  HTTP connect timeout in seconden. (Default: `10.0`)
-
-- `--http-retries`  
-  Aantal retries bij tijdelijke fouten (0 = uit). (Default: `0`; in `--production` default `3` tenzij je `--http-retries` of `HTTP_RETRIES` expliciet zet)
-
-- `--http-backoff`  
-  Backoff factor voor retries. (Default: `0.5`)
-
-- `--http-pool-connections`  
-  Connection pool: aantal pools. (Default: `10`)
-
-- `--http-pool-maxsize`  
-  Connection pool: max connections per pool. (Default: `10`)
-
-- `--publish-delay`  
-  Minimum delay in seconden tussen transaction bundles. (Default: `0.0`)
-
-- `--max-retry-after`  
-  Maximaal aantal seconden om een HTTP `Retry-After` te respecteren tussen bundles (0 = negeer). (Default: `300`)
-
-### Observability / safety
-
-- `--log-level`  
-  Log level (DEBUG/INFO/WARNING/ERROR).
-
-- `--log-format {json|text}`  
-  Log output formaat. (Default: `json`)
-
-- `--production`  
-  Behandel “risicovolle” instellingen als errors (bijv. http:// fhir-base, `--no-verify-tls`, SQL encrypt hints).
-
----
-
-## Environment variabelen
-
-De volgende environment variabelen kunnen als defaults gebruikt worden (ook via `.env`). CLI parameters hebben voorrang.
-
-### Basis
-
-- `SQL_CONN` → `--sql-conn`
-- `FHIR_BASE` → `--fhir-base`
-
-### SQLite demo
-
-- `SQLITE_RESET_SEED` → `--sqlite-reset-seed` (1/true = wis demo-data en maak de seed opnieuw)
-
-### FHIR reset
-
-- `FHIR_RESET_SEED` → `--fhir-reset-seed` (1/true = wis alle resources op de FHIR server)
-
-### Auth
-
-- `FHIR_TOKEN` → `--token`
-- `OAUTH_TOKEN_URL` → `--oauth-token-url`
-- `OAUTH_CLIENT_ID` → `--oauth-client-id`
-- `OAUTH_CLIENT_SECRET` → `--oauth-client-secret`
-- `OAUTH_SCOPE` → `--oauth-scope`
-
-### Publish gedrag
-
-- `BUNDLE_SIZE` → `--bundle-size`
-- `SINCE_UTC` → `--since`
-- `INCLUDE_PROVENANCE` → `--include-provenance` (1/true = voeg Provenance toe; default: false)
-
-### Profiel / NL GF
-
-- `PROFILE_SET` → `--profile-set`
-- `ASSIGNED_ID_SYSTEM_BASE` → `--assigned-id-system-base`
-- `DEFAULT_URA` → `--default-ura`
-- `PUBLISHER_URA` → `--publisher-ura` (hard override; PoC/test)
-- `BGZ_POLICY` → `--bgz-policy`
-- `INCLUDE_META_LASTUPDATED` → `--include-meta-lastupdated`
-- `INCLUDE_META_SOURCE` → `--include-meta-source`
-- `PUBLISHER_SOURCE` → `--publisher-source` (alleen gebruikt als meta.source aan staat)
-
-### mTLS
-
-- `MTLS_CERT` → `--mtls-cert`
-- `MTLS_KEY` → `--mtls-key`
-
-### HTTP tuning
-
-- `HTTP_TIMEOUT` → `--timeout`
-- `HTTP_CONNECT_TIMEOUT` → `--connect-timeout`
-- `HTTP_RETRIES` → `--http-retries`
-- `HTTP_BACKOFF` → `--http-backoff`
-- `HTTP_POOL_CONNECTIONS` → `--http-pool-connections`
-- `HTTP_POOL_MAXSIZE` → `--http-pool-maxsize`
-- `PUBLISH_DELAY_SECONDS` → `--publish-delay`
-- `MAX_RETRY_AFTER_SECONDS` → `--max-retry-after`
-
-### Logging
-
-- `ITI130_LOG_LEVEL` → `--log-level`
-- `ITI130_LOG_FORMAT` → `--log-format`
-
----
-
-## Tips voor beheer
-
-- Voor een **initiële load**: draai zonder `--since` en overweeg een grotere `--bundle-size` zodat referenties vaker in dezelfde transaction zitten.
-- Voor **periodieke updates**: draai met `--since` en beheer de “laatste succesvolle timestamp” extern (scheduler/CI).
-- Als je `--delete-inactive` gebruikt: wees voorzichtig met Endpoint DELETE; NL GF adviseert meestal “status=off”.
-
-
----
-
-## Licensing
-
-- **Code**: MIT (see `../../LICENSE` and `LICENSE.md`).
-- **Documentation**: CC BY-SA 4.0 (see `../../LICENSES/CC-BY-SA-4.0.txt`).
-- **Third-party dependencies**: see `THIRD_PARTY_LICENSES.md`.
+- Full stack: [`../../start-stack/README.md`](../../start-stack/README.md)
+- Repository overview: [`../../README.md`](../../README.md)

@@ -1,485 +1,405 @@
-# mCSD ITI-90 Address Book Proxy (FastAPI)
+# mCSD ITI-90 Address Book Proxy
 
-Deze app is een kleine **FastAPI**-proxy die eenvoudige queries vertaalt naar **FHIR (mCSD / ITI-90)**-searches op een upstream mCSD/FHIR-server en (waar nodig) resultaten “flattened” teruggeeft voor gebruik in een frontend.
+This FastAPI service fronts an upstream mCSD/FHIR directory and adds two kinds
+of behavior:
 
-De proxy bedient twee PoC's die onafhankelijk van elkaar ingezet kunnen worden:
+- address-book searches with flattened output for operator-facing clients
+- BgZ notified-pull helpers for endpoint discovery, capability mapping, and
+  notification delivery
 
-- **PoC 14** — mCSD-adresboek: zoeken van organisaties, locaties, zorgverleners en e-mailadressen.
-- **PoC 9** — MSZ / BgZ notified pull: organisatieonderdelen, technische endpoints, capability mapping en het versturen van BgZ-notificaties.
+The `/poc9/...` route names are retained for backward compatibility with the
+existing UI and test flow, but this service is part of the current PoC 11/13
+stack.
 
----
+## In This Repository
 
-## Rol in deze repository
+For end-to-end local use, start the full stack via
+[`../../start-stack/README.md`](../../start-stack/README.md). In that setup:
 
-Voor de volledige lokale PoC-stack start je via
-[`../../poc9-start-stack/README.md`](../../poc9-start-stack/README.md). In die
-setup draait deze service als `iti-90-address-book-proxy` op poort `8000` en
-laadt hij configuratie uit `services/iti-90/.env.Docker`.
+- the container name is `iti-90-address-book-proxy`
+- the service listens on port `8000`
+- configuration comes from `services/iti-90/.env.Docker`
 
-Belangrijk bij verificatie en handmatige tests: deze app gebruikt
-`MCSD_ALLOWED_HOSTS`. Benader de service daarom via `http://localhost:8000` of
-een andere hostnaam die in `.env.Docker` is toegestaan; anders krijg je
-`Invalid host header`.
+This app enforces `MCSD_ALLOWED_HOSTS`, so use `http://localhost:8000` or
+another configured host name during manual testing.
 
-## PoC-overzicht: endpoints en configuratie
+## What This Service Adds
 
-### Endpoints per PoC
+Compared with a plain pass-through proxy, this service adds three important
+layers:
 
-| Endpoint | PoC 14 | PoC 9 | Opmerkingen |
-|---|:---:|:---:|---|
-| `GET /health` | ✓ | ✓ | Altijd beschikbaar |
-| `GET /mscd_zoek/` | ✓ | — | Serveert de meegeleverde HTML-zoekpagina |
-| `GET /mcsd/search/{resource}` | ✓ | — | Pass-through FHIR search (Practitioner, PractitionerRole, HealthcareService, Location, Organization, Endpoint, OrganizationAffiliation) |
-| `GET /addressbook/organization` | ✓ | — | Ook gebruikt door `mcsd_zoek.html` |
-| `GET /addressbook/location` | ✓ | — | Ook gebruikt door `mcsd_zoek.html` |
-| `GET /addressbook/search` | ✓ | — | Flattened practitioner + role search |
-| `GET /addressbook/find-practitionerrole` | ✓ | — | Practitioner → PractitionerRole lookup |
-| `GET /poc9/msz/organizations` | — | ✓ | MSZ-zorgorganisaties |
-| `GET /poc9/msz/orgunits` | — | ✓ | Organisatieonderdelen |
-| `GET /poc9/msz/endpoints` | — | ✓ | Technische endpoints |
-| `GET /poc9/msz/capability-mapping` | — | ✓ | PoC 9 decision tree A–D |
-| `POST /bgz/load-data` | — | ✓ | BgZ sample data laden (demo) |
-| `POST /bgz/preflight` | — | ✓ | Preflight check vóór notificatie |
-| `POST /bgz/task-preview` | — | ✓ | Task preview (UI/test) |
-| `POST /bgz/notify` | — | ✓ | BgZ notificatie versturen |
+- request normalization and allow-listing for upstream directory queries
+- flattened response shapes for UI-oriented address-book searches
+- sender-side BgZ workflow helpers that resolve receiver endpoints from the
+  directory instead of trusting arbitrary client-supplied URLs
 
-### Configuratie per PoC
+## Common Usage Modes
 
-| Environment variabele | PoC 14 | PoC 9 | Toelichting |
-|---|:---:|:---:|---|
-| `MCSD_BASE` | **vereist** | **vereist** | Upstream mCSD/FHIR base URL |
-| `MCSD_API_KEY` | optioneel | optioneel | API key beveiliging |
-| `MCSD_ALLOW_ORIGINS` | aanbevolen | aanbevolen | CORS origins |
-| `MCSD_ALLOWED_HOSTS` | aanbevolen | aanbevolen | Allowed hosts |
-| `MCSD_IS_PRODUCTION` | optioneel | optioneel | Productie guardrails |
-| `MCSD_LOG_LEVEL` | optioneel | optioneel | Loglevel |
-| `MCSD_UPSTREAM_TIMEOUT` | optioneel | optioneel | Timeout upstream calls |
-| `MCSD_HTTPX_MAX_CONNECTIONS` | optioneel | optioneel | HTTP client pool |
-| `MCSD_HTTPX_MAX_KEEPALIVE_CONNECTIONS` | optioneel | optioneel | HTTP client pool |
-| `MCSD_BEARER_TOKEN` | optioneel | optioneel | Upstream authenticatie |
-| `MCSD_VERIFY_TLS` | optioneel | optioneel | TLS verificatie |
-| `MCSD_CA_CERTS_FILE` | optioneel | optioneel | Custom CA bundle |
-| `MCSD_MTLS_CERT_FILE` | optioneel | optioneel | Clientcertificaat voor upstream mTLS |
-| `MCSD_MTLS_KEY_FILE` | optioneel | optioneel | Private key voor upstream mTLS |
-| `MCSD_MAX_QUERY_PARAMS` | optioneel | — | Limieten voor `/mcsd/search/{resource}` |
-| `MCSD_MAX_QUERY_VALUE_LENGTH` | optioneel | — | Limieten voor `/mcsd/search/{resource}` |
-| `MCSD_MAX_QUERY_PARAM_VALUES` | optioneel | — | Limieten voor `/mcsd/search/{resource}` |
-| `MCSD_NOTIFIEDPULL_ENABLED` | — | optioneel | BgZ endpoints aan/uit (default: aan) |
-| `MCSD_SENDER_URA` | — | **vereist** | BgZ sender-identiteit |
-| `MCSD_SENDER_NAME` | — | **vereist** | BgZ sender-identiteit |
-| `MCSD_SENDER_UZI_SYS` | — | **vereist** | BgZ sender-identiteit |
-| `MCSD_SENDER_SYSTEM_NAME` | — | **vereist** | BgZ sender-identiteit |
-| `MCSD_SENDER_BGZ_BASE` | — | **vereist voor verzenden** | BgZ sender FHIR base |
-| `MCSD_AUDIT_HMAC_KEY` | — | optioneel | BSN pseudonimisatie in audit logs |
-| `MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION` | — | optioneel | Task preview in productie |
-| `MCSD_CAPABILITY_CACHE_TTL_SECONDS` | — | optioneel | Cache TTL capability checks |
-| `MCSD_DEBUG_DUMP_JSON` | — | optioneel | Debug JSON dumps |
-| `MCSD_DEBUG_DUMP_DIR` | — | optioneel | Debug dump directory |
-| `MCSD_DEBUG_DUMP_REDACT` | — | optioneel | Redactie in debug dumps |
+This service is usually used in one of two ways:
 
-### Snel starten per PoC
+- as an address-book/search proxy in front of an upstream mCSD/FHIR directory
+- as the sender-side helper for the local BgZ notified-pull flow
 
-**Alleen PoC 14** — minimale configuratie:
+In address-book mode, the important settings are mainly `MCSD_BASE`, upstream
+auth/TLS, and host/CORS limits. The `/addressbook/*` and `/mcsd/search/*`
+routes remain useful even when the BgZ helpers are disabled.
 
-```bash
-export MCSD_BASE=https://hapi.fhir.org/baseR4
-# optioneel: MCSD_NOTIFIEDPULL_ENABLED=false  (schakelt de BgZ/PoC 9 endpoints uit)
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
+In BgZ mode, the service also needs sender identity settings, sender FHIR base
+settings, and access to the local Nuts node so it can request a receiver token,
+build the notification Task, and maintain the sender workflow Task.
 
-**Alleen PoC 9** — minimale configuratie:
+If you set `MCSD_NOTIFIEDPULL_ENABLED=false`, the service still works as an
+address-book proxy, but all `/bgz/*` routes return `503`.
 
-```bash
-export MCSD_BASE=https://hapi.fhir.org/baseR4
-export MCSD_SENDER_URA=urn:oid:2.16.528.1.1007.3.3.1234567
-export MCSD_SENDER_NAME="Mijn ZBC"
-export MCSD_SENDER_UZI_SYS=urn:oid:2.16.528.1.1007.3.2.1234567
-export MCSD_SENDER_SYSTEM_NAME="Mijn ZBC (BgZ)"
-export MCSD_SENDER_BGZ_BASE=https://mijn-sender-fhir.example.org/fhir
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
+## Routes
 
-**Beide PoC's** — combineer de bovenstaande variabelen.
+General:
 
----
+- `GET /health`
+- `GET /docs`
 
-## Operator / deploy
+HTML helpers:
 
-### Installatie (lokaal)
+- `GET /mscd_zoek/`
+- `GET /mcsd_bgz_verwijzing/`
 
-```bash
-python -m venv .venv
-. .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
+Directory search:
 
-### Configuratie
+- `GET /mcsd/search/{resource}`
+- `GET /addressbook/organization`
+- `GET /addressbook/location`
+- `GET /addressbook/search`
+- `GET /addressbook/find-practitionerrole`
 
-De app leest configuratie uit environment variabelen (en optioneel uit `.env` via `pydantic-settings`).
-De tests stellen `MCSD_BASE=https://hapi.fhir.org/baseR4` automatisch in.
+MSZ and capability mapping:
 
-Voor de Docker Compose stack in deze repository (`poc9-start-stack/docker-compose.yaml`) geldt:
+- `GET /poc9/msz/organizations`
+- `GET /poc9/msz/orgunits`
+- `GET /poc9/msz/endpoints`
+- `GET /poc9/msz/capability-mapping`
 
-- service `iti-90-address-book-proxy` laadt settings uit `services/iti-90/.env.Docker` via `env_file`
-- pas dus voor stack-gedrag vooral `services/iti-90/.env.Docker` aan (met name `MCSD_BASE`, `MCSD_SENDER_*`, en `MCSD_RECEIVER_NOTIFICATION_SCOPE`)
-- bij handmatig lokaal starten (`python main.py` of `uvicorn`) wordt standaard `services/iti-90/.env` gebruikt, tenzij je `MCSD_ENV_FILE` zet
+BgZ helpers:
 
-#### Upstream mCSD/FHIR base
+- `POST /bgz/load-data`
+- `POST /bgz/preflight`
+- `POST /bgz/task-preview`
+- `POST /bgz/notify`
 
-`MCSD_BASE` is een **volledige base URL**.
+When `MCSD_NOTIFIEDPULL_ENABLED=false`, all `/bgz/*` endpoints return `503`.
 
-Dat betekent het niet alleen de upstream server bepaalt, maar ook:
+## How The BgZ Endpoints Differ
 
-- het **protocol** (`http` of `https`)
-- de **port** (optional)
+`POST /bgz/load-data` is a demo helper. It pushes the bundled sample data into a
+target FHIR base so the local sender flow has predictable test content.
 
-Voorbeelden:
+`POST /bgz/preflight` validates whether a notification can be sent. It checks
+sender configuration, resolves the receiver notification endpoint from the
+directory, derives routing information from the selected target, and can probe
+the receiver `/metadata` endpoint before any Task is sent.
 
-```bash
-export MCSD_BASE=https://hapi.fhir.org/baseR4
+`POST /bgz/task-preview` builds the notification Task without sending it. This
+is useful for UI inspection and troubleshooting because it shows the exact Task
+shape and the resolved routing metadata.
 
-export MCSD_BASE=https://mtls.fort365.net/address-book/admin-directory
+`POST /bgz/notify` performs the full flow: resolve the receiver endpoint, create
+or prepare the sender workflow-task state, and submit the notification Task to
+the resolved receiver endpoint.
 
-# lokaal HTTP op port 8080
-export MCSD_BASE=http://localhost:8080/mcsd
+What that means in practice:
 
-# HTTPS op port 8443
-export MCSD_BASE=https://myserver:8443/mcsd
+- the frontend no longer decides the final receiver base URL
+- a chosen endpoint id from the UI is treated as a hint and checked for staleness
+- routing is recalculated from the directory again before sending
+- the notification Task and the sender workflow Task are related but distinct:
+  one is sent outward, the other is hosted on the configured sender storage FHIR
+  base for the follow-up flow
 
-# HTTPS met default port 443
-export MCSD_BASE=https://myserver/mcsd
-```
+## Key Configuration
 
-Er zijn **geen** aparte variabelen voor protocol/poort; dit volgt volledig uit `MCSD_BASE`.
+Core upstream settings:
 
-#### Timeouts en HTTP client
+- `MCSD_BASE`: required upstream mCSD/FHIR base URL
+- `MCSD_UPSTREAM_TIMEOUT`
+- `MCSD_HTTPX_MAX_CONNECTIONS`
+- `MCSD_HTTPX_MAX_KEEPALIVE_CONNECTIONS`
+- `MCSD_BEARER_TOKEN`
+- `MCSD_VERIFY_TLS`
+- `MCSD_CA_CERTS_FILE`
+- `MCSD_MTLS_CERT_FILE`
+- `MCSD_MTLS_KEY_FILE`
 
-```bash
-export MCSD_UPSTREAM_TIMEOUT=15
-export MCSD_HTTPX_MAX_CONNECTIONS=50
-export MCSD_HTTPX_MAX_KEEPALIVE_CONNECTIONS=20
-```
+Access control and safety:
 
-#### Upstream authenticatie
+- `MCSD_API_KEY`: optional `X-API-Key` protection for all endpoints except `/health`
+- `MCSD_ALLOW_ORIGINS`
+- `MCSD_ALLOWED_HOSTS`
+- `MCSD_IS_PRODUCTION`
+- `MCSD_MAX_QUERY_PARAMS`
+- `MCSD_MAX_QUERY_VALUE_LENGTH`
+- `MCSD_MAX_QUERY_PARAM_VALUES`
 
-Als je upstream een Bearer token verwacht:
+BgZ sender flow:
 
-```bash
-export MCSD_BEARER_TOKEN="…"
-```
+- `MCSD_NOTIFIEDPULL_ENABLED`
+- `MCSD_SENDER_URA`
+- `MCSD_SENDER_NAME`
+- `MCSD_SENDER_UZI_SYS`
+- `MCSD_SENDER_SYSTEM_NAME`
+- `MCSD_SENDER_BGZ_PUBLIC_BASE`
+- `MCSD_SENDER_BGZ_STORAGE_BASE`
+- `MCSD_SENDER_BGZ_BASE`
+- `MCSD_SENDER_NUTS_SUBJECT_ID`
+- `MCSD_NUTS_INTERNAL_BASE`
+- `MCSD_RECEIVER_NOTIFICATION_SCOPE`
+- `MCSD_RECEIVER_TOKEN_TIMEOUT`
 
-De proxy voegt dan `Authorization: Bearer …` toe aan upstream requests.
+Audit and troubleshooting:
 
-#### TLS / certificaatverificatie
+- `MCSD_AUDIT_HMAC_KEY`
+- `MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION`
+- `MCSD_CAPABILITY_CACHE_TTL_SECONDS`
+- `MCSD_DEBUG_DUMP_JSON`
+- `MCSD_DEBUG_DUMP_DIR`
+- `MCSD_DEBUG_DUMP_REDACT`
+- `MCSD_LOG_LEVEL`
 
-Bij gebruik van `https://`, kan je TLS verificatie instellen met:
+`MCSD_SENDER_BGZ_PUBLIC_BASE` is the externally advertised sender URL.
+`MCSD_SENDER_BGZ_STORAGE_BASE` is the internal sender FHIR base used to create
+and update workflow tasks. `MCSD_SENDER_BGZ_BASE` remains as a legacy fallback
+for both when the split variables are not set.
 
-```bash
-export MCSD_VERIFY_TLS=true        # of false (niet aanbevolen)
-export MCSD_CA_CERTS_FILE=/secrets/shared/nuts-development-network-ca/stable/ca.pem
-export MCSD_MTLS_CERT_FILE=/secrets/iti-90/mtls/test-uzi-client-chain.pem
-export MCSD_MTLS_KEY_FILE=/secrets/iti-90/mtls/test-uzi-client.key
-```
+## Configuration Guidance
 
-`MCSD_CA_CERTS_FILE` wordt alleen gebruikt als `MCSD_VERIFY_TLS=true`.
-Als `MCSD_MTLS_KEY_FILE` leeg is, moet `MCSD_MTLS_CERT_FILE` ook de private key bevatten.
-Voor de Nuts development network CA gebruik je `stable/ca.pem` als trust anchor; dat repo bevat geen kant-en-klaar clientcertificaat.
-In de Docker stack mount `start-stack/docker-compose.yaml` de repo-root `secrets/` map op `/secrets` voor ITI-90.
+The earlier version of this README had much more deployment guidance. That was
+useful, and the current short variable list was not enough, so the practical
+guidance is restored here in English.
 
-Een lokale test-UZI clientcert-set kan je genereren met:
+### 1. Upstream Directory Connection
+
+`MCSD_BASE` is the full upstream FHIR base URL. It determines the upstream
+host, path, scheme, and port in one setting.
+
+Examples:
 
 ```bash
-./scripts/setup-test-uzi-mtls.sh
+MCSD_BASE=https://hapi.fhir.org/baseR4
+MCSD_BASE=http://localhost:8080/fhir
+MCSD_BASE=https://mtls.example.org/address-book/admin-directory
 ```
 
-#### CORS en allowed hosts
+Operationally:
 
-Standaard staan CORS en host-checks “open” voor lokale ontwikkeling. Voor productie moet je dit dichtzetten.
+- there are no separate protocol or port settings
+- all pass-through and flattened search endpoints ultimately read from this base
+- `GET /health` does not probe the upstream; it only confirms the proxy itself
+  is alive
 
-```bash
-export MCSD_ALLOW_ORIGINS='["https://jouw-frontend.example"]'
-export MCSD_ALLOWED_HOSTS='["jouw-proxy.example"]'
-```
+### 2. Upstream Auth, TLS, And mTLS
 
-> Let op: de parsing van list-waardes hangt af van je runtime/omgeving. In veel setups werkt JSON zoals hierboven; in andere setups wordt een komma-gescheiden string gebruikt. Test dit in je deployment-omgeving.
+When the upstream directory requires authentication or private trust anchors,
+these settings control that connection:
 
-#### API key (optioneel)
+- `MCSD_BEARER_TOKEN`
+- `MCSD_VERIFY_TLS`
+- `MCSD_CA_CERTS_FILE`
+- `MCSD_MTLS_CERT_FILE`
+- `MCSD_MTLS_KEY_FILE`
 
-Als je `MCSD_API_KEY` zet, zijn (bijna) alle endpoints beveiligd met een header:
+Behavior to be aware of:
 
-- Header: `X-API-Key: <jouw key>`
+- `MCSD_CA_CERTS_FILE` is only relevant when TLS verification is on
+- if `MCSD_MTLS_KEY_FILE` is omitted, the cert file must also include the
+  private key
+- for local or PoC environments, disabling TLS verification may work, but the
+  service explicitly rejects that when `MCSD_IS_PRODUCTION=true`
 
-```bash
-export MCSD_API_KEY="supersecret"
-```
+In the stack, the repo-root `secrets/` tree is mounted into the ITI-90
+container, so paths such as `/secrets/iti-90/mtls/...` and
+`/secrets/shared/...` are the intended runtime layout.
 
-Alleen `GET /health` blijft altijd zonder API key bereikbaar.
+### 3. Access Control And Production Guardrails
 
-#### Productie guardrails
+Three settings matter most for exposing the proxy safely:
 
-Als je `MCSD_IS_PRODUCTION=true` zet, faalt de app bij startup als één van deze onveilige defaults nog actief is:
+- `MCSD_API_KEY`
+- `MCSD_ALLOW_ORIGINS`
+- `MCSD_ALLOWED_HOSTS`
+
+If `MCSD_API_KEY` is set, all protected endpoints require `X-API-Key`, while
+`/health` remains open for liveness checks.
+
+`MCSD_ALLOWED_HOSTS` is enforced by the app, which is why stack testing should
+use `localhost:8000` or another configured host name. If the host header does
+not match, the app rejects the request before the route logic runs.
+
+When `MCSD_IS_PRODUCTION=true`, the service fails fast at startup if any of
+these unsafe defaults are still present:
 
 - `MCSD_ALLOW_ORIGINS=["*"]`
 - `MCSD_ALLOWED_HOSTS=["*"]`
 - `MCSD_VERIFY_TLS=false`
 
+That is deliberate: this service is often used as an integration boundary, so
+production mode is meant to surface weak defaults early instead of letting them
+slip through.
+
+### 4. BgZ Sender Identity And Base URLs
+
+For the sender-side BgZ flow, these settings are the important ones:
+
+- `MCSD_SENDER_URA`
+- `MCSD_SENDER_NAME`
+- `MCSD_SENDER_UZI_SYS`
+- `MCSD_SENDER_SYSTEM_NAME`
+- `MCSD_SENDER_NUTS_SUBJECT_ID`
+- `MCSD_SENDER_BGZ_PUBLIC_BASE`
+- `MCSD_SENDER_BGZ_STORAGE_BASE`
+- legacy fallback: `MCSD_SENDER_BGZ_BASE`
+
+The code currently treats the sender base as two concerns:
+
+- `MCSD_SENDER_BGZ_PUBLIC_BASE` is the externally advertised sender URL that
+  the receiver should use later in the flow
+- `MCSD_SENDER_BGZ_STORAGE_BASE` is the internal sender FHIR base where this
+  proxy creates and updates workflow tasks
+
+`MCSD_SENDER_BGZ_BASE` is still supported as a legacy fallback for both, but
+the split variables are the clearer configuration for the current stack.
+
+Also important:
+
+- `MCSD_SENDER_UZI_SYS` must be a RFC3986 URN such as `urn:oid:...` or
+  `urn:uuid:...`
+- `POST /bgz/preflight` and `POST /bgz/notify` require a usable sender storage
+  base, because they need to host the workflow Task
+- `POST /bgz/task-preview` can still generate the notification Task without
+  writing the workflow Task, but it still needs the sender identity values
+
+### 5. Receiver Token And Nuts Integration
+
+The sender-side flow no longer trusts a free-form receiver base from the client.
+Instead it:
+
+1. resolves the receiver destination from the directory
+2. resolves the matching notification endpoint
+3. requests a receiver token through the local Nuts node
+4. posts the notification Task to the resolved receiver endpoint
+
+The key settings here are:
+
+- `MCSD_NUTS_INTERNAL_BASE`
+- `MCSD_RECEIVER_NOTIFICATION_SCOPE`
+- `MCSD_RECEIVER_TOKEN_TIMEOUT`
+- optionally `MCSD_SENDER_NUTS_SUBJECT_ID`
+
+If `MCSD_SENDER_NUTS_SUBJECT_ID` is unset, the code falls back to the sender
+URA as the subject id used in the internal Nuts token request.
+
+### 6. Query Limits And Capability Cache
+
+The raw pass-through search endpoint has input-shaping controls:
+
+- `MCSD_MAX_QUERY_PARAMS`
+- `MCSD_MAX_QUERY_VALUE_LENGTH`
+- `MCSD_MAX_QUERY_PARAM_VALUES`
+
+Those limits mainly protect `GET /mcsd/search/{resource}` from overly large or
+pathological query strings. The more opinionated flattened endpoints have their
+own route-specific validation.
+
+The service also keeps a small in-memory cache for best-effort capability
+checks, controlled by `MCSD_CAPABILITY_CACHE_TTL_SECONDS`. That cache is mainly
+there to avoid repeatedly probing the same receiver metadata during interactive
+testing.
+
+### 7. Debug Dumps, Task Preview, And Troubleshooting
+
+These settings are specifically for test and troubleshooting workflows:
+
+- `MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION`
+- `MCSD_DEBUG_DUMP_JSON`
+- `MCSD_DEBUG_DUMP_DIR`
+- `MCSD_DEBUG_DUMP_REDACT`
+
+Important behavior:
+
+- `POST /bgz/task-preview` is blocked in production unless
+  `MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION=true`
+- debug JSON dumps are off by default
+- when enabled, the proxy writes outgoing payloads for `POST /bgz/load-data`
+  and `POST /bgz/notify` to disk
+- known BSN fields are redacted before writing when
+  `MCSD_DEBUG_DUMP_REDACT=true`
+
+This is useful for local debugging, but those files can still contain sensitive
+integration data. Keep it off outside controlled environments.
+
+## Current BgZ Behavior
+
+- capability mapping resolves receiver endpoints from the directory instead of
+  accepting a free-form receiver base URL from the client
+- notifications are built as minimal STU3 `Task` resources with
+  `authorization-base` in `Task.input`
+- sender follow-up state is hosted on the configured sender storage FHIR base
+- task preview and notify share the same backend routing logic
+
+In practice that means the frontend does not decide where the notification is
+posted. It can choose a receiver target and optionally a frontend-visible
+endpoint id, but the backend resolves the effective notification destination
+again from the directory and rejects stale selections.
+
+The `/poc9/msz/capability-mapping` response is also intentionally richer than a
+simple yes/no answer. It explains which endpoints were found on the target and
+organization, which capability combination won, and which normalized bases are
+safe to use for the next step in the flow.
+
+## Quick Start By Usage Mode
+
+### Address-Book Only
+
+If you only want the mailbox and practitioner search features, the minimal setup
+is small:
+
 ```bash
-export MCSD_IS_PRODUCTION=true
-```
-
-#### [PoC 14] Query-limieten (bescherming)
-
-Voor `GET /mcsd/search/{resource}` (het pass-through search endpoint) kun je limieten instellen. Deze gelden niet voor de addressbook- of PoC-endpoints, die eigen validatie hebben.
-
-```bash
-export MCSD_MAX_QUERY_PARAMS=50
-export MCSD_MAX_QUERY_VALUE_LENGTH=256
-export MCSD_MAX_QUERY_PARAM_VALUES=20
-```
-
-#### Feature flags en logging
-
-##### [PoC 9] Notified Pull endpoints aan/uit (BgZ)
-
-Standaard staan de BgZ/Notified Pull endpoints **aan** en worden ook controles gedaan om te bepalen of de configuratie hiervoor in orde is.
-Voor PoC 14 worden de BgZ/Notified Pull endpoints niet gebruikt. Ze kunnen daarom in één keer uit gezet worden met:
-
-```bash
+export MCSD_BASE=https://hapi.fhir.org/baseR4
 export MCSD_NOTIFIEDPULL_ENABLED=false
-```
-
-Als dit `false` is:
-- `POST /bgz/load-data`, `POST /bgz/preflight`, `POST /bgz/task-preview` en `POST /bgz/notify` retourneren `503`.
-- Bij startup worden de BgZ Task-templates niet gevalideerd.
-
-##### Loglevel
-
-```bash
-export MCSD_LOG_LEVEL=INFO   # DEBUG, INFO, WARNING, ERROR
-```
-
-##### File logging
-
-Bij startup schrijft de proxy een logbestand naar de debug dump directory (standaard `/tmp/mcsd-debug`). Dit logbestand bevat dezelfde output als stdout maar is handig als de applicatie onder systemd/journal draait. Bestandsnaam bevat een timestamp, bijv. `mcsd_20260217T120000.000000Z.log`.
-
-##### Capability cache TTL
-
-Voor sommige best-effort capability checks (bijv. `/metadata`) gebruikt de proxy een kleine in-memory cache:
-
-```bash
-export MCSD_CAPABILITY_CACHE_TTL_SECONDS=600
-```
-
-#### [PoC 9] BgZ sender-identiteit (voor `POST /bgz/preflight`, `POST /bgz/task-preview` en `POST /bgz/notify`)
-
-De BgZ endpoints versturen/tonen een **notified pull**-achtige Task namens een *vaste* afzender (PoC-sender).  
-Om spoofing vanuit het frontend te voorkomen komen sender-waarden uit environment variabelen:
-
-- `MCSD_SENDER_URA` — **verplicht**
-- `MCSD_SENDER_NAME` — **verplicht**
-- `MCSD_SENDER_UZI_SYS` — **verplicht** (`requester.agent.identifier.value`; moet een RFC3986 URN zijn, bijvoorbeeld `urn:oid:...` of `urn:uuid:...`)
-- `MCSD_SENDER_SYSTEM_NAME` — **verplicht** (displaynaam van de requester/agent)
-- `MCSD_SENDER_BGZ_BASE` — **verplicht voor verzenden** (nodig voor `POST /bgz/preflight` en `POST /bgz/notify`, om de Workflow Task te hosten)
-
-Voorbeeld:
-
-```bash
-export MCSD_SENDER_URA=urn:oid:2.16.528.1.1007.3.3.1234567
-export MCSD_SENDER_NAME="Mijn ZBC"
-export MCSD_SENDER_UZI_SYS=urn:oid:2.16.528.1.1007.3.2.1234567
-export MCSD_SENDER_SYSTEM_NAME="Mijn ZBC (BgZ)"
-export MCSD_SENDER_BGZ_BASE=https://mijn-sender-fhir.example.org/fhir
-```
-
-Opmerking:
-- Als `MCSD_SENDER_BGZ_BASE` ontbreekt, dan blijft `POST /bgz/task-preview` bruikbaar maar zonder `sender_bgz_base` metadata/extensie; `POST /bgz/preflight` en `POST /bgz/notify` falen met `500` (misconfigured).
-
-#### [PoC 9] Audit logging en task preview (voor `POST /bgz/notify` en `POST /bgz/task-preview`)
-
-Voor audit logging en (optioneel) het tonen van de uiteindelijke Task vóór verzending zijn er extra variabelen:
-
-- `MCSD_AUDIT_HMAC_KEY` — optioneel. Als gezet, wordt gevoelige patiënt-identificatie (zoals BSN) **niet** als plain value gelogd maar als **HMAC-hash** (pseudonimisatie) in de audit logs.
-- `MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION` — optioneel (default `false`). Als `true`, is `POST /bgz/task-preview` ook beschikbaar als `MCSD_IS_PRODUCTION=true`.
-
-Voorbeeld:
-
-```bash
-export MCSD_AUDIT_HMAC_KEY="een-lange-random-secret"
-export MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION=false
-```
-
-#### [PoC 9] Debug JSON dumps (voor `POST /bgz/load-data` en `POST /bgz/notify`)
-
-Voor debug doeleinden kan de proxy de **outgoing JSON payloads** die deze endpoints naar een externe FHIR server sturen wegschrijven als bestanden op disk.
-
-- `POST /bgz/load-data`: schrijft per verstuurde resource (PUT) één JSON bestand.
-- `POST /bgz/notify`: schrijft één JSON bestand met de Task die naar `{receiver_notification_base}/Task` wordt gepost.
-
-Dit staat standaard **uit** en is bedoeld voor lokale ontwikkeling; gebruik dit niet in productie omdat bestanden (ook met redactie) gevoelige data kunnen bevatten.
-
-Environment variabelen:
-
-- `MCSD_DEBUG_DUMP_JSON` — optioneel (default `false`). Zet op `true` om dumps te schrijven.
-- `MCSD_DEBUG_DUMP_DIR` — optioneel (default `/tmp/mcsd-debug`). Directory waarin bestanden worden weggeschreven (moet writable zijn).
-- `MCSD_DEBUG_DUMP_REDACT` — optioneel (default `true`). Redigeert bekende BSN-identifiers/velden in de JSON voordat deze naar disk gaat.
-
-Voorbeeld:
-
-```bash
-export MCSD_DEBUG_DUMP_JSON=true
-export MCSD_DEBUG_DUMP_DIR=/tmp/mcsd-debug
-export MCSD_DEBUG_DUMP_REDACT=true
-```
-
-Bestandsnamen bevatten een timestamp en (als beschikbaar) de `X-Request-ID`, zodat je dumps makkelijk kunt koppelen aan applicatie-logs.
-
-
-### Run
-
-```bash
-# Als je bestand `main.py` heet:
-# uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-Je kunt ook direct runnen (zonder uvicorn commandline):
-
-```bash
 python main.py
 ```
 
-### Draai tests (met de **publieke HAPI FHIR R4 server** op `https://hapi.fhir.org/baseR4`)
+That keeps the address-book routes available while making it explicit that this
+instance is not meant to send BgZ notifications.
+
+### Full BgZ Sender Flow
+
+For the sender-side notified-pull flow, the practical minimum is larger because
+the service needs a sender identity, a sender workflow-task store, and a Nuts
+node for receiver-token requests:
 
 ```bash
-pytest -q
+export MCSD_BASE=http://localhost:8080/fhir
+export MCSD_SENDER_URA=12345678
+export MCSD_SENDER_NAME="Demo Sender"
+export MCSD_SENDER_UZI_SYS=urn:oid:2.16.528.1.1007.3.2.1234567
+export MCSD_SENDER_SYSTEM_NAME="Demo Sender System"
+export MCSD_SENDER_BGZ_STORAGE_BASE=http://localhost:8082/fhir
+export MCSD_RECEIVER_NOTIFICATION_SCOPE=demo-scope
+python main.py
 ```
 
-Notes:
-- Tests will **skip gracefully** if the upstream is unreachable (e.g., network/firewall issues).  
-- The proxy always sends `Accept: application/fhir+json` upstream, ensuring JSON responses.
+If you plan to expose a receiver-usable sender URL later in the flow, also set
+`MCSD_SENDER_BGZ_PUBLIC_BASE`. If you want `POST /bgz/notify` to work, a local
+Nuts node still needs to be reachable at `MCSD_NUTS_INTERNAL_BASE`.
 
-FastAPI documentatie:
-- Swagger UI: `/docs` - bevat nu ook de gedeelde `X-Request-ID` request/response headerdocumentatie en voorbeeldresponses per endpoint
-- OpenAPI spec: `/openapi.json`
+## Practical Endpoint Guide
 
-### Observability / request-id
+The shortened README lost too much of the day-to-day usage detail. The sections
+below restore the important parts without bringing back the old duplicated PoC
+tables.
 
-- Alle endpoints accepteren optioneel een request header: `X-Request-ID: <jouw-correlatie-id>`.
-- Als de client een `X-Request-ID` header meestuurt, wordt die doorgegeven (en ook upstream gezet).
-- Als die ontbreekt, genereert de proxy er één.
-- Alle responses bevatten altijd dezelfde waarde terug in de response header `X-Request-ID`.
-- In JSON-foutresponses komt dezelfde waarde ook terug als `request_id`.
+### Raw FHIR Search
 
-Request header (optioneel, alle endpoints):
-
-```text
-X-Request-ID: demo-req-001
-```
-
-Response header (altijd, alle endpoints inclusief fouten):
-
-```text
-X-Request-ID: demo-req-001
-```
-
-Voorbeeld:
-
-```http
-GET /health HTTP/1.1
-Host: localhost:8000
-X-Request-ID: demo-req-001
-
-HTTP/1.1 200 OK
-X-Request-ID: demo-req-001
-Content-Type: application/json
-
-{"status":"ok"}
-```
-
-## Observability / audit logging
-
-Naast gewone applicatie-logs (logger `mcsd.app`) schrijft de proxy ook **audit events** (logger `mcsd.audit`) als **JSON per regel**. Dit is bedoeld voor traceability van “business events” zoals het (proberen te) versturen van een Notified Pull notificatie.
-
-Belangrijkste eigenschappen:
-
-- Audit logs bevatten **geen** volledige Task payloads.
-- Patiënt-identificatie wordt bij voorkeur **gepseudonimiseerd**: als `MCSD_AUDIT_HMAC_KEY` gezet is, wordt een HMAC-hash gelogd i.p.v. het BSN.
-- De audit events bevatten o.a. `event_type`, `request_id`, `task_group_identifier`, `notification_endpoint_id` en `http_status` (bij resultaat).
-
-Voorbeeld (conceptueel):
-
-```json
-{"event_type":"bgz.notify.attempt","request_id":"...","task_group_identifier":"urn:uuid:...","patient_ref":"hmac:...","resolved_receiver_base":"https://...","notification_endpoint_id":"Endpoint/..."}
-{"event_type":"bgz.notify.result","request_id":"...","success":true,"http_status":201,"task_id":"...","task_group_identifier":"urn:uuid:..."}
-```
-
-### Audit logs scheiden van “tech logs”
-
-Als je audit logs apart wilt wegschrijven (bijv. naar een apart bestand of een aparte log pipeline), configureer je logging zo dat logger `mcsd.audit` naar een eigen handler gaat.
-
-Een eenvoudige manier is een eigen logging-config (JSON/YAML) voor uvicorn te gebruiken. Bijvoorbeeld: route `mcsd.audit` naar stdout of naar een file handler en zet `propagate=false` voor die logger.
-
----
-
-## Frontend / API usage
-
-### Authenticatie
-
-Als `MCSD_API_KEY` is ingesteld, stuur dan bij elke call (behalve `GET /health`) een header mee:
-
-```text
-X-API-Key: <jouw key>
-```
-
-Je kunt daarnaast op alle endpoints optioneel `X-Request-ID: <jouw-correlatie-id>` meesturen. De proxy geeft diezelfde waarde altijd terug in de response header. Zie ook **Observability / request-id**.
-
-### Gedeelde endpoints
-
-#### `GET /health`
-
-Liveness/readiness voor de proxy zelf.  
-Dit endpoint controleert **niet** of de upstream mCSD server bereikbaar is.
-
-Voorbeeld:
-
-```bash
-curl http://localhost:8000/health
-```
-
-Voorbeeldresponse:
-
-```json
-{
-  "status": "ok"
-}
-```
-
-#### [PoC 14] `GET /mscd_zoek/`
-
-Serveert de meegeleverde HTML-zoekpagina `mcsd_zoek.html` voor mailbox-zoekopdrachten in PoC 14.
-
-Voorbeeld:
-
-```bash
-curl http://localhost:8000/mscd_zoek/
-```
-
-Voorbeeldresponse (HTML):
-
-```html
-<!doctype html>
-<html>
-  <head>
-    <title>mCSD zoek</title>
-  </head>
-  <body>
-    <form id="mailbox-search"></form>
-  </body>
-</html>
-```
-
-#### [PoC 14] `GET /mcsd/search/{resource}`
-
-FHIR search “pass-through” met allow-list filtering. Alleen een vaste set resource types wordt geaccepteerd:
+`GET /mcsd/search/{resource}` is the low-level pass-through route. It forwards
+queries to `MCSD_BASE`, but only for a fixed allow-list of resource types:
 
 - `Practitioner`
 - `PractitionerRole`
@@ -489,875 +409,232 @@ FHIR search “pass-through” met allow-list filtering. Alleen een vaste set re
 - `Endpoint`
 - `OrganizationAffiliation`
 
-Niet-toegestane resources geven `400`.
+It also applies per-request guardrails:
 
-Daarnaast wordt een allow-list per resource toegepast op query parameters (en `_count` wordt afgekapt op maximaal 200).
+- only allow-listed search parameters are forwarded
+- `_count` is clamped to `1..200`
+- repeated query values are limited by `MCSD_MAX_QUERY_PARAM_VALUES`
+- oversized parameter sets are rejected before the upstream call
 
-Voorbeeld:
+That makes this endpoint useful for troubleshooting or direct FHIR exploration
+without exposing the full upstream search surface.
 
-```bash
-curl "http://localhost:8000/mcsd/search/Organization?active=true&name:contains=ziekenhuis&_count=50"
-```
+### Address-Book Endpoints
 
-Voorbeeldresponse:
+`GET /addressbook/search` is the most feature-rich mailbox and practitioner
+lookup route. It does not just proxy a single upstream search. Instead it:
 
-```json
-{
-  "resourceType": "Bundle",
-  "type": "searchset",
-  "total": 1,
-  "entry": [
-    {
-      "resource": {
-        "resourceType": "Organization",
-        "id": "456",
-        "name": "Ziekenhuis Oost"
-      }
-    }
-  ]
-}
-```
+1. searches `Practitioner`
+2. searches `PractitionerRole` with `_include` resources
+3. enriches best-effort with `HealthcareService`
+4. enriches best-effort with `OrganizationAffiliation`
+5. flattens the result into frontend-friendly rows
 
-### Addressbook convenience endpoints
+It accepts both facade-style parameters and chained-style aliases. Useful
+examples are:
 
-#### [PoC 9] `GET /addressbook/find-practitionerrole`
-
-Convenience endpoint om eerst `Practitioner` te zoeken op naam en daarna bijbehorende `PractitionerRole` te halen.
-
-Query parameters:
-- `name` (verplicht)
-- `organization` (optioneel)
-- `specialty` (optioneel)
-
-Voorbeeld:
-
-```bash
-curl "http://localhost:8000/addressbook/find-practitionerrole?name=Jansen"
-```
-
-Voorbeeldresponse:
-
-```json
-{
-  "resourceType": "Bundle",
-  "type": "searchset",
-  "total": 1,
-  "entry": [
-    {
-      "resource": {
-        "resourceType": "PractitionerRole",
-        "id": "pr-1",
-        "practitioner": {
-          "reference": "Practitioner/123"
-        },
-        "organization": {
-          "reference": "Organization/456"
-        },
-        "specialty": [
-          {
-            "text": "Cardiologie"
-          }
-        ]
-      }
-    },
-    {
-      "resource": {
-        "resourceType": "Practitioner",
-        "id": "123",
-        "name": [
-          {
-            "text": "Dr. J. de Vries"
-          }
-        ]
-      }
-    }
-  ]
-}
-```
-
-#### [PoC 14] `GET /addressbook/search`
-
-Zoekt `Practitioner` + `PractitionerRole` en geeft "flattened" rows terug.  
-Verrijkt daarnaast best-effort met:
-- `HealthcareService` (op Organization of Location)
-- `OrganizationAffiliation` relaties (met org-namen via `_include`)
-
-Query parameters (selectie):
 - `name`, `family`, `given`
-- `organization` (bijv. `Organization/123`)
-- `org_name` (client-side “contains” match)
+- `organization`
+- `org_name`
 - `specialty`
 - `city`, `postal`
-- `near` in vorm `lat|lng|distance|unit`
-- `limit` (default `200`, max 2000)
-- `mode=fast|full` (default `fast`)
+- `near=lat|lng|distance|unit`
+- aliases such as `practitioner.name`, `organization.name:contains`,
+  `location.address-city`, `location.near`, and `location.near-distance`
 
-Aliases (ook toegestaan): `practitioner.name`, `practitioner.family`, `practitioner.given`, `practitioner.identifier`, `organization.name(:contains)`, `location.near`, `location.near-distance`, enz.
+`mode=fast` keeps upstream fan-out small for interactive use. `mode=full`
+follows more paging and enrichment and is better when completeness matters more
+than latency.
 
-Voorbeeld:
+`GET /addressbook/organization` is narrower: it looks for functional mailboxes
+on `Organization` resources and returns e-mail addresses from:
 
-```bash
-curl "http://localhost:8000/addressbook/search?org_name=Oost&specialty=cardio&limit=50"
-```
+- `Organization.telecom`
+- included `Endpoint.address` values with a `mailto:` scheme
 
-Voorbeeld: vind zorgverleners die "Jansen" heten in organisaties waarvan de naam "Ziekenhuis" bevat.
+`GET /addressbook/location` is similar, but location-oriented. It resolves a
+mailbox with this precedence:
 
-```bash
-curl "http://localhost:8000/addressbook/search?name=Jansen&org_name=Ziekenhuis&limit=50"
-```
+- `Location.telecom`
+- `Organization.telecom` of the linked managing organization
+- `Organization.endpoint` values with `mailto:`
 
-Response (globaal):
-- `total`: aantal rows
-- `rows`: lijst met velden zoals `practitioner_name`, `organization_name`, `email`, `phone`, `service_name`, `affiliation_*`, …
+`GET /addressbook/find-practitionerrole` is a thin helper route for the older
+UI flow: it first searches practitioners by name, then fetches matching
+`PractitionerRole` resources, with optional organization or specialty filters.
 
-Voorbeeldresponse:
+### MSZ Discovery And Capability Mapping
 
-```json
-{
-  "total": 1,
-  "rows": [
-    {
-      "practitioner_id": "123",
-      "practitioner_name": "Dr. J. de Vries",
-      "organization_id": "456",
-      "organization_name": "Ziekenhuis Oost",
-      "role": "Cardioloog",
-      "specialty": "Cardiologie",
-      "city": "Utrecht",
-      "postal": "3511AA",
-      "address": "Laan 1, Utrecht",
-      "phone": "0301234567",
-      "email": "cardiologie@ziekenhuis-oost.nl",
-      "service_name": "Poli Cardiologie",
-      "service_type": "cardiology",
-      "service_contact": "0301234567",
-      "service_org_name": "Ziekenhuis Oost",
-      "affiliation_primary_org": "",
-      "affiliation_primary_org_name": "",
-      "affiliation_participating_org": "",
-      "affiliation_participating_org_name": "",
-      "affiliation_role": ""
-    }
-  ]
-}
-```
+The `/poc9/msz/*` routes are the discovery layer for the sender-side demo flow.
 
-#### [PoC 14] `GET /addressbook/organization`
+`GET /poc9/msz/organizations` returns active organizations plus their included
+technical endpoints. `GET /poc9/msz/orgunits` expands a chosen organization into
+locations, healthcare services, sub-organizations, or all three. Both routes
+use cursor-based pagination so the UI can safely do "load more" without
+exposing raw upstream paging URLs.
 
-Zoekt **organisaties** en retourneert functionele mailboxen:
-- uit `Organization.telecom` (system=email)
-- en (indien aanwezig) uit `Endpoint.address` met `mailto:...` via `_include=Organization:endpoint`
+`GET /poc9/msz/endpoints` reads technical endpoints for a selected
+`Location/<id>`, `HealthcareService/<id>`, or `Organization/<id>`. If the
+selected target has no endpoint references of its own, the implementation can
+fall back to a parent organization endpoint when that is the only routable
+option.
 
-Query parameters:
-- `name` (optioneel) of `name:contains`
-- `active` (default `true`)
-- `limit` (default `20`, max `100`)
-- `contains` (boolean; alternatief voor `name:contains`)
+`GET /poc9/msz/capability-mapping` is the bridge between discovery and sending.
+It evaluates target-level and organization-level endpoints and returns a
+decision:
 
-Voorbeeld:
+- `A`: all required capabilities found directly on the target
+- `B`: all required capabilities found on the organization
+- `C`: the final answer is a target-plus-organization combination
+- `D`: the required capability set is incomplete
 
-```bash
-curl "http://localhost:8000/addressbook/organization?name:contains=ziekenhuis&limit=20"
-```
+For the current sender-side flow, the required capability is the
+`Twiin-TA-notification` payload type. The BgZ FHIR server capability is exposed
+as additional information, and `Nuts-OAuth` is only added when
+`include_oauth=true`.
 
-Voorbeeldresponse:
+The response is intentionally verbose because the next BgZ step needs more than
+just "supported or not". It includes candidate lists, the chosen endpoint, the
+normalized base URL, and enough target and organization context for routing and
+UI display.
 
-```json
-{
-  "count": 1,
-  "items": [
-    {
-      "resourceType": "Organization",
-      "id": "456",
-      "name": "Ziekenhuis Oost",
-      "email": "cardiologie@ziekenhuis-oost.nl",
-      "source": "organization.endpoint"
-    }
-  ]
-}
-```
+### BgZ Endpoint Walkthrough
 
-#### [PoC 14] `GET /addressbook/location`
+`POST /bgz/load-data` is a demo seeding helper. It loads the bundled BgZ sample
+resources into a target FHIR base with `PUT {ResourceType}/{id}` and rewrites
+the sender organization URA in the sample bundle before upload.
 
-Zoekt **locaties** en geeft de functionele mailbox van de zorgaanbieder (organisatie) terug:
-- eerst `Location.telecom`
-- daarna `Organization.telecom`
-- daarna `Organization.endpoint` (mailto) indien beschikbaar
+`POST /bgz/preflight` is the safest first step for a UI or operator. It checks
+that sender configuration is complete, resolves the notification endpoint again
+from the directory, optionally probes receiver `/metadata`, and returns the
+effective routing fields the backend would later use in `/bgz/notify`.
 
-Query parameters:
-- `name` (optioneel) of `name:contains`
-- `limit` (default `20`, max `100`)
-- `contains` (boolean; alternatief voor `name:contains`)
+`POST /bgz/task-preview` uses the same routing logic as `/bgz/notify` but stops
+before the outbound send. It is the easiest way to inspect the exact Task shape
+that would be posted. In production mode it stays blocked unless
+`MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION=true`.
 
-Voorbeeld:
+`POST /bgz/notify` performs the full send flow:
 
-```bash
-curl "http://localhost:8000/addressbook/location?name:contains=polikliniek&limit=20"
-```
+1. resolve the receiver endpoint via capability mapping
+2. re-resolve the receiver URA from the directory
+3. request a receiver access token through the local Nuts node
+4. create or update the sender workflow Task on the storage FHIR base
+5. post the notification Task to `{resolved_receiver_base}/Task`
 
-Voorbeeldresponse:
+Two practical details matter here:
 
-```json
-{
-  "count": 1,
-  "items": [
-    {
-      "resourceType": "Location",
-      "id": "loc-12",
-      "name": "Poli Cardiologie",
-      "email": "cardiologie@ziekenhuis-oost.nl",
-      "source": "organization.telecom",
-      "organizationId": "456",
-      "organizationName": "Ziekenhuis Oost"
-    }
-  ]
-}
-```
+- the client-supplied `receiver_ura` is treated as a consistency check, not as
+  the source of truth
+- the chosen frontend endpoint id is also treated as a hint and can be rejected
+  as stale if the backend remap no longer matches it
 
----
+### HTML Helper Pages
 
-## [PoC 9] Capability mapping
+The bundled HTML pages are still useful and should be documented, because they
+show how the repo exercises the service:
 
-IG CodeSystem used in Endpoint.payloadType to declare data-exchange capabilities.
-Reference: https://build.fhir.org/ig/nuts-foundation/nl-generic-functions-ig/CodeSystem-nl-gf-data-exchange-capabilities.html
-IG_CAPABILITY_SYSTEM = "http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities"
+- `GET /mscd_zoek/` serves the standalone mailbox search UI and only depends on
+  the address-book routes
+- `GET /mcsd_bgz_verwijzing/` serves the sender-side BgZ demo page used in the
+  notified-pull walkthrough
 
-Expected payloadType codes for PoC 9 capability mapping:
+They are thin clients around backend routes. Important checks such as host
+validation, endpoint resolution, receiver-token acquisition, and routing
+selection still happen in the API layer.
 
-### REQUIRED for BgZ Notified Pull (TA Routering):
-   - Code: "Twiin-TA-notification"
-   - System: IG_CAPABILITY_SYSTEM (see above)
-   - Purpose: Identifies the receiver's Task notification endpoint
-   - Used in: Decision tree to find the endpoint for POST Task
-   - Example mCSD entry:
-     Endpoint.payloadType[].coding[] = {
-       "system": "http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities",
-       "code": "Twiin-TA-notification"
-     }
-### OPTIONAL for BgZ FHIR server discovery (informational):
-   - Code: "http://nictiz.nl/fhir/CapabilityStatement/bgz2017-servercapabilities" (full URL as code)
-   - System: "urn:ietf:rfc:3986" or may be absent
-   - Purpose: Identifies the sender's BgZ FHIR server for receivers that cannot resolve via URA
-   - Not required for sender-side notification flow
+## Observability
 
-Note: The mCSD directory must populate Endpoint.payloadType with these codes
-for the capability mapping to work correctly.
+The app has more built-in diagnostics than the current short README suggested.
 
----
+### Request IDs
 
-## PoC-specifieke endpoints
+All requests accept an optional `X-Request-ID` header.
 
-### [PoC 9] BgZ endpoints
+- if the client sends one, the same value is propagated and returned
+- if the client does not send one, the proxy generates one
+- the response always includes `X-Request-ID`
+- normalized JSON error responses also include the request id
 
-#### `POST /bgz/load-data`
+That makes it much easier to correlate:
 
-Laadt BgZ sample data (Patient/Condition/Allergy/Medication/…) naar een doel-FHIR server (bijv. HAPI) met `PUT` per resource.
+- client requests
+- upstream FHIR calls
+- application logs
+- BgZ audit events
 
-Query parameters:
-- `hapi_base` (verplicht): base URL van de doelsserver
-- `sender_ura` (verplicht): URA/OID die in het sample bundle wordt gezet
+### Audit Logging
 
-Voorbeeld:
+BgZ flow endpoints emit structured audit events through the `mcsd.audit` logger.
+Those events are meant to be compact and traceable rather than full payload
+dumps.
+
+If `MCSD_AUDIT_HMAC_KEY` is set, patient identifiers are pseudonymized in the
+audit stream using an HMAC-derived value instead of being logged directly.
+
+### File Logging
+
+At startup, the service also writes a log file into the debug dump directory.
+That is useful in environments where stdout is not the only log sink.
+
+### OpenAPI And HTML Helpers
+
+For interactive testing:
+
+- `/docs` exposes the FastAPI Swagger UI
+- `/mscd_zoek/` serves the bundled search page
+- `/mcsd_bgz_verwijzing/` serves the bundled BgZ demo page
+
+Those HTML helpers are intentionally thin clients around the backend routes. The
+important routing and security checks still happen server-side.
+
+## Operational Notes
+
+- `GET /health` only checks the proxy itself. It does not verify that
+  `MCSD_BASE` is reachable.
+- When `MCSD_API_KEY` is configured, all endpoints except `/health` require
+  `X-API-Key`.
+- When `MCSD_IS_PRODUCTION=true`, the service fails fast if permissive CORS,
+  permissive allowed-hosts, or disabled TLS verification are still configured.
+- Debug JSON dumps are optional and meant for local troubleshooting. They should
+  stay off in production.
+- The service writes a startup log file into the debug dump directory, which is
+  useful when stdout is not the only log sink.
+
+## Local Run
+
+Install and start:
 
 ```bash
-curl -X POST "http://localhost:8000/bgz/load-data?hapi_base=http://localhost:8080/fhir&sender_ura=12345678"
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
-> PoC-only: niet bedoeld voor productie, omdat dit demo-data laadt.
+By default the service loads `.env` from this folder. Set `MCSD_ENV_FILE` to
+use a different file. In the stack, Docker loads `.env.Docker` through
+`env_file`.
 
-Voorbeeldresponse:
-
-```json
-{
-  "success": true,
-  "target": "https://sender.example/fhir",
-  "resources_created": 2,
-  "details": [
-    {
-      "resource": "Patient/patient-demo",
-      "status": 200
-    },
-    {
-      "resource": "Organization/organization-sender",
-      "status": 200
-    }
-  ]
-}
-```
-
-#### `POST /bgz/preflight`
-
-Preflight check om vóór verzending te bepalen:
-- of de backend sender-config compleet is
-- welk Twiin-TA notification endpoint en welke receiver base gebruikt gaat worden
-- (optioneel) of de receiver FHIR base bereikbaar is en `Task` creation ondersteunt
-
-Request body (JSON):
-- `receiver_target_ref` (verplicht): `Organization/<id>`, `HealthcareService/<id>` of `Location/<id>`
-- `receiver_org_ref` (optioneel): `Organization/<id>` (kan helpen bij capability mapping als het target zelf geen endpoints heeft)
-- `receiver_notification_endpoint_id` (optioneel): logische `Endpoint.id` uit de UI-keuze; backend checkt of dit nog klopt met de huidige capability mapping
-- `check_receiver` (optioneel, default `true`): probe `/metadata` op de resolved receiver base
-- `include_oauth` (optioneel, default `false`): voeg (demo/debug) OAuth/NUTS endpoints toe aan de capability mapping response
-
-Response:
-- bevat de capability mapping output (zoals `supported`, `target`, `organization`, …)
-- plus extra velden: `task_routing`, `resolved_receiver_base`, `resolved_receiver_ura`, `notification_endpoint_id`, `frontend_endpoint_id_match`, `receiver_probe`, `ready_to_send`
-
-Voorbeeldresponse (ingekort):
-
-```json
-{
-  "target": {
-    "reference": "HealthcareService/123",
-    "display": "Poli Cardiologie"
-  },
-  "organization": {
-    "reference": "Organization/456",
-    "display": "Ziekenhuis Oost"
-  },
-  "decision": "C",
-  "supported": true,
-  "notification": {
-    "address": "https://receiver.example/fhir/Task",
-    "base": "https://receiver.example/fhir",
-    "endpoint_id": "789",
-    "valid_http_base": true,
-    "source": "organization"
-  },
-  "bgz_fhir_server": {
-    "address": "https://receiver.example/fhir",
-    "base": "https://receiver.example/fhir",
-    "endpoint_id": "790",
-    "valid_http_base": true,
-    "source": "target"
-  },
-  "task_routing": {
-    "target_type": "HealthcareService",
-    "owner_ref": "Organization/456",
-    "owner_display": "Ziekenhuis Oost",
-    "location_ref": null,
-    "location_display": null,
-    "extension_location_ref": null,
-    "extension_location_display": null,
-    "extension_healthcareservice_ref": "HealthcareService/123",
-    "extension_healthcareservice_display": "Poli Cardiologie"
-  },
-  "resolved_receiver_base": "https://receiver.example/fhir",
-  "resolved_receiver_ura": "87654321",
-  "notification_endpoint_id": "789",
-  "frontend_endpoint_id_match": true,
-  "receiver_probe": {
-    "attempted": true,
-    "ok": true,
-    "reachable": true,
-    "http_status": 200,
-    "task_create_supported": true,
-    "reason": null,
-    "message": null,
-    "url": "https://receiver.example/fhir/metadata"
-  },
-  "ready_to_send": true
-}
-```
-
-#### `POST /bgz/task-preview`
-
-Bouwt een BgZ notificatie-Task (zonder te versturen). Dit is bedoeld voor UI preview/tests.
-
-- In productie is deze endpoint standaard **uit**. Zet `MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION=true` als je ’m bewust wilt gebruiken.
-
-Request body: gelijk aan `POST /bgz/notify`.
-
-Response (globaal):
-- `task`: de JSON Task die verstuurd zou worden
-- `resolved_receiver_base`: de resolved base URL
-- `notification_endpoint_id`: het gekozen/geresolveerde notification Endpoint.id
-- `workflow_task_id`: de workflow-task resource id op de sender
-- `workflow_task_identifier_system`: identifier system uit `Task.basedOn[0].identifier`
-- `workflow_task_identifier_value`: identifier value uit `Task.basedOn[0].identifier`
-- `authorization_base`: authorization-base die op de workflow task in `Task.input` en op de notification task in `Task.input` wordt opgeslagen
-- `sender_bgz_base`: de sender base (als gezet)
-
-Voorbeeldresponse:
-
-```json
-{
-  "success": true,
-  "task": {
-    "resourceType": "Task",
-    "basedOn": [
-      {
-        "identifier": {
-          "system": "urn:ietf:rfc:3986",
-          "value": "urn:uuid:11111111-1111-1111-1111-111111111111"
-        }
-      }
-    ],
-    "status": "requested",
-    "intent": "proposal",
-    "code": {
-      "coding": [
-        {
-          "system": "http://fhir.nl/fhir/NamingSystem/TaskCode",
-          "code": "pull-notification"
-        }
-      ]
-    },
-    "owner": {
-      "identifier": {
-        "system": "http://fhir.nl/fhir/NamingSystem/ura",
-        "value": "87654321"
-      }
-    },
-    "requester": {
-      "agent": {
-        "identifier": {
-          "system": "urn:ietf:rfc:3986",
-          "value": "urn:oid:2.16.528.1.1007.3.2.1234567"
-        }
-      },
-      "onBehalfOf": {
-        "identifier": {
-          "system": "http://fhir.nl/fhir/NamingSystem/ura",
-          "value": "12345678"
-        }
-      }
-    },
-    "input": [
-      {
-        "type": {
-          "coding": [
-            {
-              "system": "http://fhir.nl/fhir/NamingSystem/TaskParameter",
-              "code": "authorization-base"
-            }
-          ]
-        },
-        "valueString": "M2Q0ZDU2NzgtYWJjZA=="
-      }
-    ]
-  },
-  "sender_bgz_base": "https://sender.example/fhir",
-  "resolved_receiver_base": "https://receiver.example/fhir",
-  "notification_endpoint_id": "789",
-  "workflow_task_id": "workflow-task-123",
-  "workflow_task_identifier_system": "urn:ietf:rfc:3986",
-  "workflow_task_identifier_value": "urn:uuid:11111111-1111-1111-1111-111111111111",
-  "authorization_base": "M2Q0ZDU2NzgtYWJjZA=="
-}
-```
-
-#### `POST /bgz/notify`
-
-Stuurt een notificatie **Task** (notified pull pattern) naar de receiver (`{receiver_notification_base}/Task`).
-
-De sender-identiteit komt uit environment variabelen (zie “BgZ sender-identiteit”).
-
-**Verzendproces (twee stappen):**
-
-1. **Workflow Task aanmaken** — De backend bouwt een Workflow Task (met BgZ queries/resources in `Task.input`) en slaat deze op op de sender’s FHIR server (`MCSD_SENDER_BGZ_BASE`) via `PUT /Task/{id}` (met fallback naar `POST /Task` als de server geen client-assigned ids accepteert).
-2. **Notification Task versturen** — De backend POST de notification Task naar `{receiver_notification_base}/Task`.
-
-De notification Task zelf gebruikt de minimale Step 2 shape:
-- `basedOn[0].identifier` verwijst naar de primaire workflow-task identifier van de sender
-- `input.authorization-base` blijft aanwezig als enige authorization-base drager voor de follow-up pull en gateway-autorisatie
-- velden zoals `description`, `for`, sender BgZ extension en `get-workflow-task` worden niet meer meegestuurd
-
-Voor PoC 11-13 geldt daarnaast:
-
-- `MCSD_SENDER_UZI_SYS` en `MCSD_SENDER_SYSTEM_NAME` zijn verplicht
-- `MCSD_SENDER_UZI_SYS` moet een RFC3986 URN zijn (`urn:oid:...` of `urn:uuid:...`)
-- `MCSD_SENDER_BGZ_PUBLIC_BASE` wordt alleen nog als response-metadata teruggegeven
-- `MCSD_SENDER_BGZ_STORAGE_BASE` wordt gebruikt voor de interne workflow-task opslag op de sender FHIR server
-- `MCSD_SENDER_BGZ_BASE` wordt alleen nog als legacy fallback gebruikt
-
-**SSRF-mitigatie:** de client geeft geen vrije `receiver_base` mee. In plaats daarvan resolveert de backend `receiver_notification_base` opnieuw via het mCSD-adresboek (`MCSD_BASE`) op basis van `receiver_target_ref` (en optioneel `receiver_org_ref`) met PoC 9 capability mapping. Daarbij wordt een `Endpoint` gezocht met payloadType `Twiin-TA-notification`, waarna `Endpoint.address` wordt genormaliseerd naar een base (o.a. trailing `/` en eventuele `/Task` eraf) en vervolgens wordt gevalideerd als een http(s)-URL.
-
-**Receiver-authenticatie:** vóór het posten van de notification Task vraagt SYS via de lokale Nuts internal API een access token aan voor het door mCSD ontdekte `Nuts-OAuth` endpoint van de receiver. Als er geen receiver OAuth endpoint gevonden wordt of de tokenaanvraag faalt, wordt de notificatie niet zonder authenticatie verstuurd maar hard gefaald.
-
-**URA-resolutie:** Hoewel `receiver_ura` verplicht is in het request, resolveert de backend de URA **altijd opnieuw** vanuit de mCSD Organization resource (via `Organization.identifier` met system `http://fhir.nl/fhir/NamingSystem/ura`). De client-meegegeven `receiver_ura` wordt alleen ter controle vergeleken; bij een mismatch wordt een warning gelogd. Als er geen URA gevonden kan worden in het mCSD-adresboek, faalt het request met HTTP 400 (`no_receiver_ura`).
-
-Audit logging: bij elke poging en uitkomst van `POST /bgz/notify` wordt een audit event gelogd via logger `mcsd.audit` (zie Observability / audit logging).
-
-Request body (JSON):
-- `receiver_target_ref` (verplicht): `Organization/<id>`, `HealthcareService/<id>` of `Location/<id>`
-- `receiver_org_ref` (optioneel): `Organization/<id>` (kan helpen bij capability mapping als het target zelf geen endpoints heeft)
-- `receiver_notification_endpoint_id` (optioneel): logische `Endpoint.id` uit preflight/UI (backend checkt op “stale” endpoint-keuze)
-- `receiver_ura` (verplicht)
-- `receiver_name` (verplicht): display name van receiver (bijv. “Ziekenhuis Oost – Cardiologie”)
-- `receiver_org_name` (optioneel): display name van de receiver-organisatie
-- `patient_bsn` (verplicht)
-- `patient_name` (optioneel)
-- `description` (optioneel)
-- `workflow_task_id` (optioneel): als leeg, genereert de server een id en zet `Task.basedOn` naar `Task/<id>`
-
-Voorbeeld:
+## Tests
 
 ```bash
-curl -X POST "http://localhost:8000/bgz/notify" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "receiver_target_ref": "HealthcareService/123",
-    "receiver_org_ref": "Organization/456",
-    "receiver_ura": "87654321",
-    "receiver_name": "Ziekenhuis Oost - Cardiologie",
-    "receiver_org_name": "Ziekenhuis Oost",
-    "patient_bsn": "172642863",
-    "patient_name": "J.P. van der Berg",
-    "description": "BgZ notified pull demo"
-  }'
+pytest -vv tests
 ```
 
-Voorbeeldresponse:
+The test suite is split by behavior:
 
-```json
-{
-  "success": true,
-  "target": "https://receiver.example/fhir/Task",
-  "task_id": "receiver-task-456",
-  "task_status": "requested",
-  "group_identifier": "notif-20260303-1234",
-  "sender_bgz_base": "https://sender.example/fhir",
-  "resolved_receiver_base": "https://receiver.example/fhir",
-  "workflow_task_id": "workflow-task-123"
-}
-```
+- `tests/test_app.py` covers raw search, flattened address-book behavior, and
+  upstream request shaping such as `Accept: application/fhir+json`
+- `tests/test_capability_mapping.py` covers endpoint normalization and the
+  target/organization capability-selection logic
+- `tests/test_bgz_endpoints.py` covers preflight, task preview, notify, load
+  data, sender-base split behavior, and the Nuts token-request path
 
-**Foutafhandeling (hard fail)**
+Some tests depend on the public HAPI FHIR server and may skip gracefully when
+that upstream is unreachable from the environment where the suite is run.
 
-Als er via PoC9 capability mapping géén `Endpoint` met payloadType `Twiin-TA-notification` gevonden kan worden voor het gekozen `receiver_target_ref` (en optioneel `receiver_org_ref`), dan kan de backend geen veilige `receiver_notification_base` bepalen. In dat geval wordt er **geen** notificatie verstuurd en retourneert de API een **HTTP 400**:
+## Related Docs
 
-```json
-{
-  "reason": "no_notification_endpoint",
-  "message": "Geen Twiin TA notification endpoint gevonden voor het gekozen target/organisatie.",
-  "request_id": "..."
-}
-```
-
-Dit is een “hard fail”: de caller moet eerst zorgen dat in het mCSD-adresboek een geschikt (actief) Twiin-TA-notification Endpoint aanwezig is en daarna opnieuw notificeren.
-
-### [PoC 9] MSZ endpoints
-
-Deze endpoints ondersteunen PoC 8/9 UI-flows (MSZ organisaties, organisatieonderdelen en technische endpoints).  
-Ze hebben cursor-based paginering voor “meer laden” in de UI.
-
-#### `GET /poc9/msz/organizations`
-
-Zoekt MSZ-zorgorganisaties (Organization) en levert per org ook technische endpoint-info (op basis van `_include=Organization:endpoint`).
-
-Query parameters:
-- `name` (optioneel), `contains` (boolean)
-- `identifier` (optioneel)
-- `type` (optioneel; query-param alias)
-- `limit` (default 20)
-- `cursor` (optioneel; voor volgende pagina)
-
-Response bevat o.a. `next` (opaque cursor) en `total` (upstream total, indien aanwezig).
-
-Voorbeeldresponse:
-
-```json
-{
-  "count": 1,
-  "items": [
-    {
-      "resourceType": "Organization",
-      "id": "456",
-      "name": "Ziekenhuis Oost",
-      "identifier": [
-        {
-          "system": "http://fhir.nl/fhir/NamingSystem/ura",
-          "value": "87654321"
-        }
-      ],
-      "type": [
-        {
-          "coding": [
-            {
-              "system": "http://terminology.hl7.org/CodeSystem/organization-type",
-              "code": "prov",
-              "display": "Healthcare Provider"
-            }
-          ]
-        }
-      ],
-      "endpoints": [
-        {
-          "id": "789",
-          "address": "https://receiver.example/fhir/Task",
-          "status": "active",
-          "connectionType": {
-            "system": "http://hl7.org/fhir/endpoint-connection-type",
-            "code": "hl7-fhir-rest",
-            "display": "HL7 FHIR REST"
-          },
-          "payloadType": [
-            {
-              "system": "http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities",
-              "code": "Twiin-TA-notification",
-              "display": "Twiin TA notificatie"
-            }
-          ],
-          "payloadMimeType": [
-            "application/fhir+json"
-          ],
-          "header": []
-        }
-      ]
-    }
-  ],
-  "next": "eyJuZXh0IjoiaHR0cHM6Ly9leGFtcGxlLm9yZy9maGlyL09yZ2FuaXphdGlvbj9wYWdlPTIifQ==",
-  "total": 42
-}
-```
-
-#### `GET /poc9/msz/orgunits`
-
-Zoekt organisatieonderdelen binnen een org:
-- `kind=location|service|suborg|all`
-- `organization` is verplicht in de eerste call (zonder `cursor`)
-- `cursor` voor volgende pagina’s
-
-Voorbeeldresponse:
-
-```json
-{
-  "count": 1,
-  "items": [
-    {
-      "resourceType": "HealthcareService",
-      "id": "123",
-      "name": "Poli Cardiologie",
-      "organization": "Organization/456",
-      "specialty": [
-        {
-          "text": "Cardiologie"
-        }
-      ],
-      "endpoints": [
-        {
-          "id": "789",
-          "address": "https://receiver.example/fhir/Task",
-          "status": "active",
-          "connectionType": {
-            "system": "http://hl7.org/fhir/endpoint-connection-type",
-            "code": "hl7-fhir-rest",
-            "display": "HL7 FHIR REST"
-          },
-          "payloadType": [
-            {
-              "system": "http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities",
-              "code": "Twiin-TA-notification",
-              "display": "Twiin TA notificatie"
-            }
-          ],
-          "payloadMimeType": [
-            "application/fhir+json"
-          ],
-          "header": []
-        }
-      ]
-    }
-  ],
-  "next": null,
-  "total": 1
-}
-```
-
-#### `GET /poc9/msz/endpoints`
-
-Haalt “technische endpoints” op voor een geselecteerd target (`Location/…`, `HealthcareService/…`, `Organization/…`).
-
-Query parameters:
-- `target` (verplicht zonder cursor): `ResourceType/id`
-- optioneel filters: `endpoint_kind` (heuristisch), `connection_type`, `payload_type`, `payload_mime_type`
-- `limit`, `cursor`
-
-Voorbeeldresponse:
-
-```json
-{
-  "count": 1,
-  "items": [
-    {
-      "id": "789",
-      "address": "https://receiver.example/fhir/Task",
-      "status": "active",
-      "connectionType": {
-        "system": "http://hl7.org/fhir/endpoint-connection-type",
-        "code": "hl7-fhir-rest",
-        "display": "HL7 FHIR REST"
-      },
-      "payloadType": [
-        {
-          "system": "http://nuts-foundation.github.io/nl-generic-functions-ig/CodeSystem/nl-gf-data-exchange-capabilities",
-          "code": "Twiin-TA-notification",
-          "display": "Twiin TA notificatie"
-        }
-      ],
-      "payloadMimeType": [
-        "application/fhir+json"
-      ],
-      "header": []
-    }
-  ],
-  "next": null,
-  "total": 1
-}
-```
-
-#### `GET /poc9/msz/capability-mapping`
-
-Resolve’t endpoints voor capabilities via decision tree A–D (PoC 9).  
-Required: Twiin TA notificatie capability. Optioneel: BgZ FHIR server capability en Nuts OAuth (`include_oauth=true`).
-
-Query parameters:
-- `target` (verplicht): `ResourceType/id`
-- `organization` (optioneel): `Organization/id` (anders probeert de service dit af te leiden)
-- `include_oauth` (optioneel)
-- `limit` (max endpoints per scope)
-
-Voorbeeldresponse (ingekort):
-
-```json
-{
-  "target": {
-    "reference": "HealthcareService/123",
-    "display": "Poli Cardiologie"
-  },
-  "organization": {
-    "reference": "Organization/456",
-    "display": "Ziekenhuis Oost",
-    "identifier": [
-      {
-        "system": "http://fhir.nl/fhir/NamingSystem/ura",
-        "value": "87654321"
-      }
-    ]
-  },
-  "decision": "C",
-  "decision_explanation": "Vereiste capabilities zijn gevonden door target + organisatie te combineren (per capability: target → organisatie).",
-  "supported": true,
-  "missing": [],
-  "notification": {
-    "address": "https://receiver.example/fhir/Task",
-    "base": "https://receiver.example/fhir",
-    "endpoint_id": "789",
-    "valid_http_base": true,
-    "source": "organization"
-  },
-  "bgz_fhir_server": {
-    "address": "https://receiver.example/fhir",
-    "base": "https://receiver.example/fhir",
-    "endpoint_id": "790",
-    "valid_http_base": true,
-    "source": "target"
-  }
-}
-```
-
----
-
-## [PoC 14] Frontend: `mcsd_zoek.html`
-
-`mcsd_zoek.html` is een standalone HTML-pagina waarmee gebruikers e-mailadressen van organisaties of locaties kunnen opzoeken in het mCSD-adresboek.
-
-De pagina kan statisch gehost worden, maar wordt in deze applicatie ook geserveerd via **`GET /mscd_zoek/`**.
-
-### Gebruikte endpoints
-
-De pagina gebruikt uitsluitend twee addressbook convenience endpoints:
-
-- **`GET /addressbook/organization`** — zoek organisaties met functionele mailboxen
-- **`GET /addressbook/location`** — zoek locaties met functionele mailboxen van de gekoppelde organisatie
-
-Beide worden aangeroepen met de query parameters `name:contains=<zoekterm>` en `limit=<max>`.
-
-### Configuratie in de HTML
-
-Bovenaan het `<script>`-blok staan drie constanten die per omgeving aangepast moeten worden:
-
-```javascript
-const BASE_URL = "http://10.10.10.199:8000"; // proxy base URL
-const API_KEY  = "";                          // laat leeg als geen API key vereist is
-const MCS_LIMIT = 50;                         // max resultaten per zoekopdracht
-```
-
-### Relevante server-instellingen
-
-| Instelling | Van toepassing? | Toelichting |
-|---|---|---|
-| `MCSD_BASE` | **Ja** | Bepaalt de upstream FHIR server |
-| `MCSD_API_KEY` | **Ja** | Als gezet, moet `API_KEY` in de HTML overeenkomen |
-| `MCSD_ALLOW_ORIGINS` | **Ja** | Moet de origin van de HTML-pagina bevatten (of `["*"]` voor dev) |
-| `MCSD_ALLOWED_HOSTS` | **Ja** | Moet de proxy-hostnaam bevatten |
-| `MCSD_UPSTREAM_TIMEOUT` | **Ja** | Beïnvloedt de responstijd |
-| `MCSD_BEARER_TOKEN` | **Ja** | Upstream authenticatie (transparant voor de HTML-client) |
-| `MCSD_VERIFY_TLS` / `MCSD_CA_CERTS_FILE` / `MCSD_MTLS_CERT_FILE` / `MCSD_MTLS_KEY_FILE` | **Ja** | Upstream TLS en eventueel mTLS (transparant voor de HTML-client) |
-| `MCSD_IS_PRODUCTION` | **Ja** | Productie guardrails (CORS/hosts/TLS moeten dan dicht) |
-| `MCSD_LOG_LEVEL` | **Ja** | Voor troubleshooting |
-| `MCSD_HTTPX_MAX_CONNECTIONS` | **Ja** | HTTP client pool sizing |
-
-De volgende instellingen zijn **niet van toepassing** bij gebruik van `mcsd_zoek.html`:
-
-| Instelling | Waarom niet |
-|---|---|
-| `MCSD_SENDER_URA`, `MCSD_SENDER_NAME`, `MCSD_SENDER_UZI_SYS`, `MCSD_SENDER_SYSTEM_NAME`, `MCSD_SENDER_BGZ_BASE` | Alleen voor BgZ notified pull endpoints |
-| `MCSD_NOTIFIEDPULL_ENABLED` | Alleen voor BgZ endpoints (`/bgz/*`) |
-| `MCSD_AUDIT_HMAC_KEY` | Alleen voor BgZ audit logging |
-| `MCSD_ALLOW_TASK_PREVIEW_IN_PRODUCTION` | Alleen voor `POST /bgz/task-preview` |
-| `MCSD_CAPABILITY_CACHE_TTL_SECONDS` | Alleen voor PoC 9 capability mapping |
-| `MCSD_MAX_QUERY_PARAMS`, `MCSD_MAX_QUERY_VALUE_LENGTH`, `MCSD_MAX_QUERY_PARAM_VALUES` | Alleen voor `GET /mcsd/search/{resource}` |
-| `MCSD_DEBUG_DUMP_JSON`, `MCSD_DEBUG_DUMP_DIR`, `MCSD_DEBUG_DUMP_REDACT` | Alleen voor BgZ debug dumps |
-
----
-
-## Verschillen met upstream / foutafhandeling
-
-De proxy normaliseert foutresponses naar één vorm:
-
-```json
-{
-  "reason": "...",
-  "message": "...",
-  "request_id": "..."
-}
-```
-
-- Upstream HTTP fouten (4xx/5xx) worden met dezelfde statuscode teruggegeven, maar de response body wordt genormaliseerd (dus niet 1-op-1 “pass-through”).
-- Connectieproblemen naar upstream worden als `502` teruggegeven met een `reason` zoals `timeout`, `dns`, `tls` of `network`.
-- In non-production kan er een extra `details` veld aanwezig zijn; in productie (`MCSD_IS_PRODUCTION=true`) wordt `details` weggelaten.
-
-Voorbeeld van een genormaliseerde fout mét request-id correlatie:
-
-```http
-HTTP/1.1 400 Bad Request
-X-Request-ID: demo-req-001
-Content-Type: application/json
-
-{
-  "reason": "bad_request",
-  "message": "Ongeldige request of parameter.",
-  "request_id": "demo-req-001"
-}
-```
-
-## Upstream-ondersteuning en verrijking
-
-### Upstream-ondersteuning varieert
-
-De proxy kan alleen zoekparameters, ketenparameters en modifiers gebruiken die de upstream mCSD/FHIR-server daadwerkelijk ondersteunt. 
-
-De CapabilityStatement (`GET {MCSD_BASE}/metadata`) kan helpen om te zien welke search parameters en interacties een server zegt te ondersteunen. Deze geeft echter niet altijd een volledig of betrouwbaar beeld van ondersteuning voor alle search modifiers (zoals `:contains` of `:exact`). Ondersteuning voor bijvoorbeeld geografische zoekparameters (zoals `near` met afstand) is eveneens afhankelijk van de implementatie van de upstream-server.
-
-### OrganizationAffiliation verrijking via `_include`
-
-Bij het ophalen van `OrganizationAffiliation`-relaties vraagt de proxy:
-
-- `_include=OrganizationAffiliation:organization`
-- `_include=OrganizationAffiliation:participating-organization`
-
-Hierdoor kunnen organisatie-namen (indien de upstream `_include` ondersteunt) in dezelfde response worden meegeleverd, zodat er geen extra round-trips naar `Organization`-resources nodig zijn.
-
-Indien de upstream-server `_include` niet ondersteunt of deze niet retourneert, wordt de verrijking beperkt uitgevoerd, maar er worden geen aanvullende fetch-calls gedaan.
+- Full stack: [`../../start-stack/README.md`](../../start-stack/README.md)
+- Secret layout: [`../../SECRETS.md`](../../SECRETS.md)

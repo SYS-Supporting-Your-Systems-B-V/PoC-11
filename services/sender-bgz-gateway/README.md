@@ -1,67 +1,167 @@
 # Sender BgZ Gateway
 
-This service exposes SYS's protected sender-side BgZ FHIR API for the post-notification pull flow.
+This service exposes the protected sender-side FHIR surface used after a BgZ
+notification has been delivered. It sits in front of the internal sender FHIR
+server and only proxies requests that pass the current authorization rules.
 
-Responsibilities:
+## Responsibilities
 
-- accept protected follow-up requests on the public sender BgZ endpoint
-- introspect incoming access tokens via the local Nuts node
-- enforce sender-side authorization based on:
-  - `authorization-base`
-  - requesting organization URA
-  - healthcare-professional claims
-  - task status
-  - patient context
-- proxy only authorized requests to the internal HAPI STU3 sender FHIR server
+- introspect incoming access tokens through the local Nuts node
+- resolve the authorized workflow task from `authorization-base`
+- allow only workflow-task-authorized follow-up reads
+- scope patient data reads to the authorized patient context
+- proxy valid reads and task status updates to the internal HAPI STU3 server
 
-This service is intentionally separate from `services/iti-90/`.
+This gateway is intentionally separate from `services/iti-90`:
 
-- `iti-90` remains the sender-side discovery and notification orchestrator
-- `sender-bgz-gateway` is the protected sender-side resource API
+- `iti-90` handles discovery, capability mapping, and notification creation
+- `sender-bgz-gateway` protects the sender-side follow-up pull and task update
 
-Key configuration:
+## Exposed Routes
+
+- `GET /health`
+- `GET /fhir/metadata`
+- `GET /fhir/Task/{task_id}`
+- `GET /fhir/Task?identifier=<system>|<value>`
+- `PUT /fhir/Task/{task_id}`
+- `GET /fhir/Observation/$lastn`
+- `GET /fhir/Patient`
+- `GET /fhir/Patient/{id}`
+- `GET /fhir/Observation`
+- `GET /fhir/Observation/{id}`
+
+Other FHIR resource types return `404`. Generic `GET /fhir/Task` search only
+supports the `identifier` query parameter.
+
+## Current PoC 11/13 Authorization Model
+
+- the token is introspected through the local Nuts node
+- the token must carry `authorization-base`
+- the authorized workflow task is the task whose `Task.input` contains that same
+  `authorization-base`
+- workflow-task reads require organization authorization, but do not require
+  healthcare-professional claims
+- patient and observation reads require healthcare-professional claims from
+  introspection
+- sender data reads are allowed only when the requested FHIR path is declared in
+  the workflow task `Task.input`
+- the gateway does not accept a custom DEZI forwarding header as a substitute
+  for introspection
+
+The gateway keeps a legacy repo-specific Task identifier system only so it can
+strip old data during `PUT` updates. It is not used as the current lookup
+contract.
+
+The important design point is that finding the workflow task is only the first
+authorization step. A valid `authorization-base` does not automatically grant
+access to arbitrary sender resources. The workflow task still has to declare the
+follow-up paths that are allowed.
+
+## Request Rules
+
+Workflow task read:
+
+- valid bearer token required
+- `organization_ura` must match the authorized task context
+- `authorization-base` must match the authorized workflow task
+- task must still be in `requested` state
+- `GET /fhir/Task/{id}` only returns the actual authorized workflow task
+
+Workflow task search:
+
+- only `identifier=<system>|<value>` is supported
+- returns the authorized workflow task only when that identifier matches
+- primarily exists for the receiver-side workflow-task lookup flow
+
+The dedicated search route is kept because the receiver flow may start from the
+notification `basedOn.identifier` instead of a direct workflow-task id.
+
+Patient and observation data:
+
+- valid bearer token required
+- `organization_ura` must match the authorized task context
+- `employee_identifier` and `employee_roles` must be present
+- `BGZ_GATEWAY_REQUIRED_SCOPES`, when configured, must match the token scopes
+- `BGZ_GATEWAY_MEDICAL_ROLE_CODES`, when configured, must intersect the token roles
+- the upstream request is automatically narrowed to the authorized patient
+
+This patient scoping is enforced in the gateway, not left to the caller. For
+`Patient` searches the gateway rewrites the upstream query to the authorized
+identifier. For `Observation` reads and searches it injects the authorized
+patient context before proxying to the internal FHIR server.
+
+Task update:
+
+- only `PUT /fhir/Task/{id}` is allowed
+- the request body may only contain `resourceType`, `id`, and `status`
+- only `completed` and `failed` are accepted as new statuses
+- the task must still be active when the update is made
+
+The gateway preserves the stored sender-side Task metadata and rejects attempts
+to update unrelated fields from the receiver side.
+
+## Key Configuration
+
+Core upstreams:
 
 - `BGZ_GATEWAY_UPSTREAM_FHIR_BASE`
-  - internal HAPI STU3 sender FHIR base
 - `BGZ_GATEWAY_NUTS_INTERNAL_BASE`
-  - local Nuts internal API base used for token introspection
 - `BGZ_GATEWAY_PATIENT_IDENTIFIER_SYSTEM`
-  - patient identifier system used to resolve the authorized patient
+
+Authorization policy:
+
 - `BGZ_GATEWAY_MEDICAL_ROLE_VALUESET_URL`
-  - reference URL for the medical-role code set used by the PoC policy
-  - default points to the DECOR `RoleCodeNLZorgverlenertypen` value set
-  - this is metadata/reference, not a runtime HTML fetch dependency
 - `BGZ_GATEWAY_MEDICAL_ROLE_CODES`
-  - optional allowlist for data-access role codes; when set, token introspection roles must intersect it
-  - recommended source is the configured `BGZ_GATEWAY_MEDICAL_ROLE_VALUESET_URL`
 - `BGZ_GATEWAY_REQUIRED_SCOPES`
-  - optional allowlist for data-access scopes
 
-Current PoC behavior:
+Transport and logging:
 
-- `Task/{id}` read requires a valid token, matching `organization_ura`, matching `authorization-base`, and a workflow task that is still `requested`
-- `Task/{id}` only works for the actual sender workflow-task id; arbitrary other sender `Task` ids are rejected
-- the current receiver flow reads the workflow task via `Task/{id}` using the sender workflow-task reference from the notification
-- `Task?identifier=<system>|<value>` remains available only for compatibility/testing and is no longer the primary documented receiver flow; it is likewise rejected once the workflow task is no longer `requested`
-- every sender data read/search must additionally match a path declared on the geauthoriseerde workflow task in `Task.input`
-- the gateway resolves the active workflow task from `Task.input[authorization-base]`; it does not use a repo-local `Task.identifier` shortcut for this
-- finding the workflow task by `authorization-base` is therefore only the first authorization step; it does not authorize arbitrary extra resources
-- workflow-task lookup does not require DEZI healthcare-professional claims; sender data reads do
-- the sender data surface is limited to the current PoC scope from the spec discussions: `Patient` plus the workflow-task-declared `Observation/$lastn` pulls for blood pressure and body weight
-- patient-identifying data reads/searches additionally require `employee_identifier` and `employee_roles`
-- BGZ-style introspection aliases such as `user_id` and `user_role` are accepted and normalized to the same internal checks
-- if `BGZ_GATEWAY_MEDICAL_ROLE_CODES` is empty, the gateway still requires at least one non-empty `employee_roles` claim, but does not hardcode an arbitrary role-code list
-- `Task/{id}` update additionally requires the workflow task to remain active, only accepts `status`, and only allows `completed` or `failed`
-- `Task/{id}` update rejects any extra Task fields from the receiver; the gateway preserves the stored sender-side metadata on the outgoing PUT
-- DEZI claims for sender data access must come back through token introspection; the gateway does not accept a custom receiver-side DEZI header as a substitute
+- `BGZ_GATEWAY_UPSTREAM_TIMEOUT`
+- `BGZ_GATEWAY_INTROSPECTION_TIMEOUT`
+- `BGZ_GATEWAY_VERIFY_TLS`
+- `BGZ_GATEWAY_CA_CERTS_FILE`
+- `BGZ_GATEWAY_LOG_LEVEL`
+- `BGZ_GATEWAY_LOG_SENSITIVE_DATA`
+- `BGZ_GATEWAY_LOG_PREVIEW_CHARS`
+- `BGZ_GATEWAY_IS_PRODUCTION`
 
-When using `services/nuts-node/policies/BGZ_policy.json`:
+## Stack Defaults
 
-- set `BGZ_GATEWAY_REQUIRED_SCOPES=bgz-sender` if you want the gateway to enforce the BGZ sender scope explicitly
-- keep using the workflow task `Task.input` list as the authoritative allowlist for follow-up sender reads
+In the Compose stack:
 
-Recommended policy shape:
+- the service listens on port `8001`
+- the upstream sender FHIR base defaults to `http://hapi-notifiedpull-stu3:8082/fhir`
+- introspection goes to `http://nuts-node:8083`
+- the default patient identifier system is `http://fhir.nl/fhir/NamingSystem/bsn`
 
-- keep the DECOR role value set URL configured as the human/audit reference
-- keep the actual enforced code allowlist local and explicit via `BGZ_GATEWAY_MEDICAL_ROLE_CODES`
-- do not fetch and parse the remote HTML at runtime
+## Operational Notes
+
+- `GET /health` reports gateway status and whether a medical-role allowlist is
+  configured; it does not validate the full downstream sender flow.
+- If `BGZ_GATEWAY_MEDICAL_ROLE_CODES` is empty, the gateway still requires a
+  non-empty role claim and does not silently disable professional-role checks.
+- The configured value-set URL is documentation and audit context only. The
+  gateway does not fetch and parse that remote HTML at runtime.
+- Logging can include sensitive previews in non-production mode, so
+  `BGZ_GATEWAY_LOG_SENSITIVE_DATA` should be treated carefully.
+
+## Local Run
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
+
+The service loads `.env` from this folder automatically when present.
+
+## Tests
+
+```bash
+pytest -vv tests
+```
+
+## Related Docs
+
+- Full stack: [`../../start-stack/README.md`](../../start-stack/README.md)
