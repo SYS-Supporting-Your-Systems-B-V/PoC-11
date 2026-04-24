@@ -503,6 +503,11 @@
             <input type="text" id="bgz-task-location" name="bgz-task-location" autocomplete="off" maxlength="128" readonly>
             <div class="small-text" style="padding-top:0.25rem;">Optioneel. Alleen gevuld als er expliciet op locatie wordt geadresseerd.</div>
         </div>
+        <div class="form-group">
+            <label for="bgz-task-healthcareservice">Task.HealthcareService</label>
+            <input type="text" id="bgz-task-healthcareservice" name="bgz-task-healthcareservice" autocomplete="off" maxlength="128" readonly>
+            <div class="small-text" style="padding-top:0.25rem;">Voor STU3 via de <code>task-stu3-healthcareservice</code> extension.</div>
+        </div>
     </div>
     <div class="actions">
         <button type="button" id="btn-bgz-notify" disabled>Verzend verwijzing</button>
@@ -690,11 +695,12 @@
         return walk(preflight, 0);
     }
 
-    function deriveTaskOwnerAndLocationRefs() {
-        // Task.owner / Task.location worden door de backend bepaald.
-        // De backend geeft in bgz/preflight expliciet terug welke refs gebruikt gaan worden.
+    function deriveTaskRoutingRefs() {
+        // Task.owner / Task.location en de STU3 HealthcareService extension
+        // worden door de backend bepaald.
         let ownerRef = "";
         let locationRef = "";
+        let healthcareServiceRef = "";
 
         try {
             const tr = (lastPreflight && lastPreflight.task_routing) ? lastPreflight.task_routing : null;
@@ -704,11 +710,15 @@
             if (tr && tr.location_ref !== undefined && tr.location_ref !== null) {
                 locationRef = String(tr.location_ref);
             }
+            if (tr && tr.extension_healthcareservice_ref !== undefined && tr.extension_healthcareservice_ref !== null) {
+                healthcareServiceRef = String(tr.extension_healthcareservice_ref);
+            }
         } catch (e) { /* ignore */ }
 
         return {
             ownerRef: sanitize(ownerRef || ""),
-            locationRef: sanitize(locationRef || "")
+            locationRef: sanitize(locationRef || ""),
+            healthcareServiceRef: sanitize(healthcareServiceRef || "")
         };
     }
     function translateResourceType(resourceType) {
@@ -1023,6 +1033,7 @@
         const receiverNameEl = document.getElementById("bgz-receiver-name");
         const taskOwnerEl = document.getElementById("bgz-task-owner");
         const taskLocationEl = document.getElementById("bgz-task-location");
+        const taskHealthcareServiceEl = document.getElementById("bgz-task-healthcareservice");
         const workflowTaskIdEl = document.getElementById("bgz-workflow-task-id");
         const btnNotify = document.getElementById("btn-bgz-notify");
 
@@ -1032,11 +1043,12 @@
                 : (selectedOrg ? sanitize(selectedOrg.name) : "");
         }
 
-        // Toon welke routeringsvelden (Task.owner/Task.location) we verwachten te gebruiken.
+        // Toon welke routeringsvelden we verwachten te gebruiken.
         // Dit is informatief; de backend blijft leidend.
-        const taskRefs = deriveTaskOwnerAndLocationRefs();
+        const taskRefs = deriveTaskRoutingRefs();
         if (taskOwnerEl) taskOwnerEl.value = taskRefs.ownerRef || "";
         if (taskLocationEl) taskLocationEl.value = taskRefs.locationRef || "";
+        if (taskHealthcareServiceEl) taskHealthcareServiceEl.value = taskRefs.healthcareServiceRef || "";
 
         if (chosenEl) {
             chosenEl.value = (selectedEndpoint && selectedEndpoint.address) ? sanitize(selectedEndpoint.address) : "";
@@ -1213,6 +1225,9 @@
         }
         if (!("location_ref" in data.task_routing)) {
             throw new Error("Backend contract mismatch (preflight): 'task_routing.location_ref' ontbreekt.");
+        }
+        if (!("extension_healthcareservice_ref" in data.task_routing)) {
+            throw new Error("Backend contract mismatch (preflight): 'task_routing.extension_healthcareservice_ref' ontbreekt.");
         }
     }
 

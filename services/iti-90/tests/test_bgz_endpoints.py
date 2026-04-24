@@ -85,6 +85,29 @@ def _find_task_extension(task: Dict[str, Any], url: str) -> Optional[Dict[str, A
     return None
 
 
+def _assert_workflow_task_target_extensions(
+    appmod,
+    task: Dict[str, Any],
+    *,
+    expected_healthcareservice_identifier: Optional[Dict[str, Any]],
+    expected_location_identifier: Optional[Dict[str, Any]],
+) -> None:
+    hs_ext = _find_task_extension(task, appmod.TASK_EXT_TASK_STU3_HEALTHCARESERVICE_URL)
+    loc_ext = _find_task_extension(task, appmod.TASK_EXT_TASK_STU3_LOCATION_URL)
+
+    if expected_healthcareservice_identifier is None:
+        assert hs_ext is None
+    else:
+        assert hs_ext is not None
+        assert hs_ext.get("valueIdentifier") == expected_healthcareservice_identifier
+
+    if expected_location_identifier is None:
+        assert loc_ext is None
+    else:
+        assert loc_ext is not None
+        assert loc_ext.get("valueIdentifier") == expected_location_identifier
+
+
 def _find_task_identifier(task: Dict[str, Any], system: str) -> Optional[Dict[str, Any]]:
     for identifier in (task or {}).get("identifier") or []:
         if (identifier or {}).get("system") == system:
@@ -782,6 +805,63 @@ def test_bgz_task_preview_generates_workflow_task_id_when_missing(appmod, client
         expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
         expected_authorization_base=body["authorization_base"],
     )
+
+
+@pytest.mark.parametrize(
+    ("receiver_target_ref_norm", "receiver_target_identifiers", "target_type", "expected_healthcareservice_identifier", "expected_location_identifier"),
+    [
+        ("Organization/org-1", None, "Organization", None, None),
+        (
+            "HealthcareService/hs-1",
+            [{"system": "https://sys.local/identifiers/healthcareservices", "value": "topicus-healthcareservice-unit-1"}],
+            "HealthcareService",
+            {"system": "https://sys.local/identifiers/healthcareservices", "value": "topicus-healthcareservice-unit-1"},
+            None,
+        ),
+        (
+            "Location/loc-1",
+            [{"system": "https://sys.local/identifiers/locations", "value": "topicus-location-unit-1"}],
+            "Location",
+            None,
+            {"system": "https://sys.local/identifiers/locations", "value": "topicus-location-unit-1"},
+        ),
+    ],
+)
+def test_build_bgz_workflow_task_populates_target_identifier_extensions(
+    appmod,
+    receiver_target_ref_norm: str,
+    receiver_target_identifiers: Optional[List[Dict[str, Any]]],
+    target_type: str,
+    expected_healthcareservice_identifier: Optional[Dict[str, Any]],
+    expected_location_identifier: Optional[Dict[str, Any]],
+):
+    task = appmod._build_bgz_workflow_task(
+        workflow_task_id="wf-777",
+        workflow_task_identifier_value="urn:uuid:11111111-1111-1111-1111-111111111111",
+        group_identifier="urn:uuid:22222222-2222-2222-2222-222222222222",
+        authorization_base="auth-base-123",
+        sender_ura="12345678",
+        sender_name="Huisartsenpraktijk De Vries",
+        sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
+        sender_system_name="SYS EPD POC9",
+        receiver_ura="87654321",
+        receiver_target_ref_norm=receiver_target_ref_norm,
+        receiver_target_identifiers=receiver_target_identifiers,
+        target_type=target_type,
+        patient_bsn="999999990",
+        patient_name="Test Patient",
+        description="BgZ beschikbaar voor test (workflow target extension)",
+    )
+
+    _assert_workflow_task_target_extensions(
+        appmod,
+        task,
+        expected_healthcareservice_identifier=expected_healthcareservice_identifier,
+        expected_location_identifier=expected_location_identifier,
+    )
+    dumped = json.dumps(task)
+    assert "DYNAMIC:receiver_healthcareservice_id" not in dumped
+    assert "DYNAMIC:receiver_location_id" not in dumped
 
 
 def test_bgz_task_preview_rejects_non_urn_sender_software_identifier(appmod, client, monkeypatch):

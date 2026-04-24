@@ -59,6 +59,22 @@
       "value": "DYNAMIC:receiver_ura_from_mcsd"
     }
   },
+  "extension": [
+    {
+      "url": "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-healthcareservice",
+      "valueIdentifier": {
+        "system": "urn:ietf:rfc:3986",
+        "value": "DYNAMIC:receiver_healthcareservice_id"
+      }
+    },
+    {
+      "url": "http://nuts-foundation.github.io/nl-generic-functions-ig/StructureDefinition/task-stu3-location",
+      "valueIdentifier": {
+        "system": "urn:ietf:rfc:3986",
+        "value": "DYNAMIC:receiver_location_id"
+      }
+    }
+  ],
   "input": [
     {
       "type": {

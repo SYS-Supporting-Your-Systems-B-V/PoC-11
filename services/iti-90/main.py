@@ -4614,6 +4614,51 @@ class TaskBuilder:
             value_ref["identifier"] = copy.deepcopy(identifier)
         self.task["extension"].append({"url": ext_url, "valueReference": value_ref})
 
+    def set_identifier_extension(
+        self,
+        *,
+        ext_url: str,
+        identifier: Optional[Dict[str, Any]] = None,
+        system: Optional[str] = None,
+        value: Optional[str] = None,
+    ) -> None:
+        """Upsert a simple extension with valueIdentifier.
+
+        Used by the Workflow Task template to persist the addressed
+        HealthcareService or Location identifier.
+        """
+        if not isinstance(self.task.get("extension"), list):
+            self.task["extension"] = []
+        self.task["extension"] = [
+            e
+            for e in self.task["extension"]
+            if not (isinstance(e, dict) and e.get("url") == ext_url)
+        ]
+
+        value_identifier: Dict[str, Any] = {}
+        if isinstance(identifier, dict):
+            ident_system = str(identifier.get("system") or "").strip()
+            ident_value = str(identifier.get("value") or "").strip()
+            if ident_system and ident_value:
+                value_identifier = {"system": ident_system, "value": ident_value}
+                for k in ("use", "type", "period", "assigner"):
+                    if identifier.get(k) is not None:
+                        value_identifier[k] = copy.deepcopy(identifier.get(k))
+        else:
+            ident_system = str(system or "").strip()
+            ident_value = str(value or "").strip()
+            if ident_system and ident_value:
+                value_identifier = {"system": ident_system, "value": ident_value}
+
+        if not value_identifier:
+            return
+        self.task["extension"].append(
+            {
+                "url": ext_url,
+                "valueIdentifier": value_identifier,
+            }
+        )
+
     def set_task_stu3_location_extension(
         self,
         reference: str,
@@ -4628,6 +4673,12 @@ class TaskBuilder:
             identifier=identifier,
         )
 
+    def set_task_stu3_location_identifier_extension(self, identifier: Optional[Dict[str, Any]] = None) -> None:
+        self.set_identifier_extension(
+            ext_url=TASK_EXT_TASK_STU3_LOCATION_URL,
+            identifier=identifier,
+        )
+
     def set_task_stu3_healthcareservice_extension(
         self,
         reference: str,
@@ -4639,6 +4690,12 @@ class TaskBuilder:
             ext_url=TASK_EXT_TASK_STU3_HEALTHCARESERVICE_URL,
             reference=reference,
             display=display,
+            identifier=identifier,
+        )
+
+    def set_task_stu3_healthcareservice_identifier_extension(self, identifier: Optional[Dict[str, Any]] = None) -> None:
+        self.set_identifier_extension(
+            ext_url=TASK_EXT_TASK_STU3_HEALTHCARESERVICE_URL,
             identifier=identifier,
         )
 
@@ -4685,7 +4742,8 @@ class TaskBuilder:
         - Task.owner.reference (if present) must be Organization/... (routing to a specific
           HealthcareService/Location is expressed using NL-GF STU3 Task extensions).
         - If NL-GF STU3 routing extensions are present, their valueReference.reference must
-          match the expected resource type.
+          match the expected resource type. Workflow Task templates may alternatively use
+          valueIdentifier.value with the logical id only (or a relative ref).
         - (Legacy/R4) Task.location.reference (if present) must be Location/...
         """
         # Validate owner.identifier is set
@@ -4718,6 +4776,19 @@ class TaskBuilder:
                 continue
             value_ref = ext.get("valueReference")
             if not isinstance(value_ref, dict):
+                value_identifier = ext.get("valueIdentifier")
+                if not isinstance(value_identifier, dict):
+                    continue
+                ident_value = str(value_identifier.get("value") or "").strip()
+                if not ident_value:
+                    continue
+                rt, _ = _split_ref(ident_value)
+                if url == TASK_EXT_TASK_STU3_LOCATION_URL and rt and rt != "Location":
+                    raise RuntimeError("Task.extension(task-stu3-location) moet verwijzen naar Location/... of alleen een Location id bevatten.")
+                if url == TASK_EXT_TASK_STU3_HEALTHCARESERVICE_URL and rt and rt != "HealthcareService":
+                    raise RuntimeError(
+                        "Task.extension(task-stu3-healthcareservice) moet verwijzen naar HealthcareService/... of alleen een HealthcareService id bevatten."
+                    )
                 continue
             ref = str(value_ref.get("reference") or "").strip()
             if not ref:
@@ -4938,6 +5009,7 @@ async def _resolve_bgz_notify_destination(
 
     return mapping, receiver_base_norm, resolved_notification_endpoint_id, receiver_target_ref_norm, receiver_org_ref_norm, target_type, resolved_receiver_ura
 
+
 def _extract_effective_org_from_mapping(mapping: Dict[str, Any]) -> tuple[str | None, str | None]:
     """Extract effective organization reference and name from capability mapping.
     
@@ -4956,6 +5028,8 @@ def _extract_effective_org_from_mapping(mapping: Dict[str, Any]) -> tuple[str | 
         effective_org_ref_norm = None
         effective_org_name = None
     return effective_org_ref_norm, effective_org_name
+
+
 def _determine_task_routing(
     *,
     target_type: str,
@@ -5069,6 +5143,9 @@ def _build_bgz_workflow_task(
     sender_uzi_sys: str,
     sender_system_name: str,
     receiver_ura: str,
+    receiver_target_ref_norm: str,
+    receiver_target_identifiers: List[Dict[str, Any]] | None = None,
+    target_type: str,
     patient_bsn: str,
     patient_name: str | None,
     description: str | None,
@@ -5087,6 +5164,18 @@ def _build_bgz_workflow_task(
     tb.set_requester_agent(uzi_sys=sender_uzi_sys, system_name=sender_system_name)
     tb.set_sender(ura=sender_ura, display=sender_name)
     tb.set_receiver_owner_identifier(ura=receiver_ura)
+    _target_rt, _target_logical_id = _split_ref(receiver_target_ref_norm)
+    target_identifier = _pick_author_assigned_identifier(receiver_target_identifiers)
+    effective_target_type = str(target_type or "").strip() or _target_rt
+    if effective_target_type == "HealthcareService":
+        tb.set_task_stu3_healthcareservice_identifier_extension(target_identifier)
+        tb.set_task_stu3_location_identifier_extension(None)
+    elif effective_target_type == "Location":
+        tb.set_task_stu3_location_identifier_extension(target_identifier)
+        tb.set_task_stu3_healthcareservice_identifier_extension(None)
+    else:
+        tb.set_task_stu3_healthcareservice_identifier_extension(None)
+        tb.set_task_stu3_location_identifier_extension(None)
     tb.set_patient(bsn=patient_bsn, display=patient_name)
     tb.set_description(description)
     tb.validate_fhir_constraints(allow_missing_refs=True)
@@ -5865,6 +5954,13 @@ async def bgz_notify(
         sender_uzi_sys=sender_uzi_sys,
         sender_system_name=sender_system_name,
         receiver_ura=resolved_receiver_ura,
+        receiver_target_ref_norm=receiver_target_ref_norm,
+        receiver_target_identifiers=(
+            ((mapping or {}).get("target") or {}).get("identifier")
+            if isinstance(((mapping or {}).get("target") or {}).get("identifier"), list)
+            else None
+        ),
+        target_type=target_type,
         patient_bsn=patient_bsn,
         patient_name=patient_name,
         description=description,
