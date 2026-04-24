@@ -330,6 +330,7 @@ def _capability_mapping_stub(
     endpoint_id: str = "ep-1",
     organization_ref: str = "Organization/org-owner",
     organization_display: str = "Ziekenhuis Oost",
+    target_identifier: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     endpoint = {
         "id": endpoint_id,
@@ -366,7 +367,10 @@ def _capability_mapping_stub(
             }
         },
         "organization": {"reference": organization_ref, "display": organization_display},
-        "target": {"reference": target},
+        "target": {
+            "reference": target,
+            "identifier": [target_identifier] if isinstance(target_identifier, dict) else [],
+        },
     }
 
 
@@ -609,7 +613,13 @@ def test_bgz_preflight_not_ready_when_metadata_has_no_task_create(appmod, client
 
 def test_bgz_preflight_healthcareservice_routing_owner_ref_only(appmod, client, monkeypatch):
     async def _fake_capability_mapping(*, target: str, organization: str | None, include_oauth: bool, limit: int):
-        return _capability_mapping_stub(target=target)
+        return _capability_mapping_stub(
+            target=target,
+            target_identifier={
+                "system": "https://sys.local/identifiers/healthcareservices",
+                "value": "topicus-healthcareservice-unit-1",
+            },
+        )
 
     monkeypatch.setattr(appmod, "poc9_msz_capability_mapping", _fake_capability_mapping)
 
@@ -642,6 +652,8 @@ def test_bgz_preflight_healthcareservice_routing_owner_ref_only(appmod, client, 
     assert routing["target_type"] == "HealthcareService"
     assert routing["owner_ref"] == "Organization/org-owner"
     assert routing["location_ref"] is None
+    assert routing["extension_healthcareservice_ref"] == "HealthcareService/hs-1"
+    assert routing["extension_healthcareservice_identifier_value"] == "topicus-healthcareservice-unit-1"
 
 
 def test_bgz_task_preview_location_routing_builds_task_from_template(appmod, client, monkeypatch):

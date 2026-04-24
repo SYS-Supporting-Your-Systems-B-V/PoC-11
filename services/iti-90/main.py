@@ -3010,8 +3010,10 @@ class TaskRoutingModel(BaseModel):
     location_display: Optional[str] = None
     extension_location_ref: Optional[str] = None
     extension_location_display: Optional[str] = None
+    extension_location_identifier_value: Optional[str] = None
     extension_healthcareservice_ref: Optional[str] = None
     extension_healthcareservice_display: Optional[str] = None
+    extension_healthcareservice_identifier_value: Optional[str] = None
 
 
 class ReceiverProbeModel(BaseModel):
@@ -4463,6 +4465,15 @@ def _pick_author_assigned_identifier(identifiers: Any) -> Optional[Dict[str, Any
     return None
 
 
+def _pick_identifier_value_for_ui(identifiers: Any) -> Optional[str]:
+    """Return the identifier.value the UI should show for STU3 routing extensions."""
+    picked = _pick_author_assigned_identifier(identifiers)
+    if not isinstance(picked, dict):
+        return None
+    value = str(picked.get("value") or "").strip()
+    return value or None
+
+
 class TaskBuilder:
     """Build/patch a FHIR Task safely (avoid runtime KeyErrors).
 
@@ -5655,8 +5666,10 @@ async def bgz_preflight(
         # STU3 routing extensions (used when 'onderdeel' is a Location or HealthcareService)
         "extension_location_ref": receiver_target_ref_norm if target_type == "Location" else None,
         "extension_location_display": target_display if target_type == "Location" else None,
+        "extension_location_identifier_value": _pick_identifier_value_for_ui(((mapping or {}).get("target") or {}).get("identifier")) if target_type == "Location" else None,
         "extension_healthcareservice_ref": receiver_target_ref_norm if target_type == "HealthcareService" else None,
         "extension_healthcareservice_display": target_display if target_type == "HealthcareService" else None,
+        "extension_healthcareservice_identifier_value": _pick_identifier_value_for_ui(((mapping or {}).get("target") or {}).get("identifier")) if target_type == "HealthcareService" else None,
     }
 
     # Return mapping + extra fields for the UI.

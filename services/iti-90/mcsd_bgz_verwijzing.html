@@ -228,6 +228,88 @@
             color: #9ca3af;
         }
 
+        .routing-panel {
+            margin: 0.9rem 0 1rem;
+            border: 1px solid #dbe4f0;
+            border-radius: 14px;
+            background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+            overflow: hidden;
+        }
+
+        .routing-panel-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.9fr);
+            gap: 1rem;
+            padding: 1rem;
+        }
+
+        .routing-card {
+            min-width: 0;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            background: #ffffff;
+            padding: 0.9rem;
+        }
+
+        .routing-card-title {
+            margin: 0 0 0.8rem;
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #64748b;
+        }
+
+        .routing-stack {
+            display: grid;
+            gap: 0.8rem;
+        }
+
+        .routing-stack .form-group {
+            flex: none;
+        }
+
+        .routing-task-row {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.85rem;
+            padding: 0 1rem 1rem;
+        }
+
+        .routing-task-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.85rem;
+        }
+
+        .routing-task-grid .form-group {
+            flex: none;
+        }
+
+        .routing-task-grid input[type="text"] {
+            background: #f8fafc;
+        }
+
+        .visually-hidden {
+            position: absolute !important;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        @media (max-width: 980px) {
+            .routing-panel-grid,
+            .routing-task-row,
+            .routing-task-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
         .results-title {
             font-size: 0.85rem;
             font-weight: 600;
@@ -465,61 +547,72 @@
 </div>
 
 
-    <div class="form-row">
-        <div class="form-group">
-            <label for="bgz-chosen-endpoint">Notification endpoint (Twiin TA)</label>
-            <input type="text" id="bgz-chosen-endpoint" name="bgz-chosen-endpoint" autocomplete="off" maxlength="256" readonly>
-            <div class="small-text" id="bgz-endpoint-hint" style="padding-top:0.25rem;"></div>
-</div>
-    </div>
+    <section class="routing-panel" aria-label="Receiver en task routing">
+        <div class="routing-panel-grid">
+            <div class="routing-card">
+                <h3 class="routing-card-title">Endpoints</h3>
+                <div class="routing-stack">
+                    <div class="form-group">
+                        <label for="bgz-chosen-endpoint">Notification endpoint (Twiin TA)</label>
+                        <input type="text" id="bgz-chosen-endpoint" name="bgz-chosen-endpoint" autocomplete="off" maxlength="256" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label for="bgz-oauth-endpoint">Nuts-OAuth endpoint</label>
+                        <input type="text" id="bgz-oauth-endpoint" name="bgz-oauth-endpoint" autocomplete="off" maxlength="256" readonly>
+                    </div>
+                </div>
+            </div>
+            <div class="routing-card">
+                <h3 class="routing-card-title">Notification Details</h3>
+                <div class="routing-stack">
+                    <div class="form-group">
+                        <label for="bgz-receiver-ura">Receiver URA</label>
+                        <input type="text" id="bgz-receiver-ura" name="bgz-receiver-ura" autocomplete="off" maxlength="64" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label for="bgz-receiver-name">Receiver naam</label>
+                        <input type="text" id="bgz-receiver-name" name="bgz-receiver-name" autocomplete="off" maxlength="128" readonly>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-<div class="form-row">
-        <div class="form-group">
-            <label for="bgz-receiver-base">Receiver notification base</label>
-            <input type="text" id="bgz-receiver-base" name="bgz-receiver-base" autocomplete="off" maxlength="256" readonly>
+        <div class="routing-task-row">
+            <div class="routing-card" style="grid-column: 1 / -1;">
+                <h3 class="routing-card-title">WorkflowTask Info</h3>
+                <div class="routing-task-grid">
+                    <div class="form-group">
+                        <label for="bgz-task-owner">Task.owner</label>
+                        <input type="text" id="bgz-task-owner" name="bgz-task-owner" autocomplete="off" maxlength="128" readonly>
+                        <div class="small-text" style="padding-top:0.25rem;">Wordt gebruikt door de ontvanger om intern te routeren naar het juiste organisatieonderdeel.</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="bgz-task-location">Task.location</label>
+                        <input type="text" id="bgz-task-location" name="bgz-task-location" autocomplete="off" maxlength="128" readonly>
+                        <div class="small-text" style="padding-top:0.25rem;">Optioneel. Alleen gevuld als er expliciet op locatie wordt geadresseerd.</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="bgz-task-healthcareservice">Task.HealthcareService</label>
+                        <input type="text" id="bgz-task-healthcareservice" name="bgz-task-healthcareservice" autocomplete="off" maxlength="128" readonly>
+                        <div class="small-text" style="padding-top:0.25rem;">Voor STU3 via de <code>task-stu3-healthcareservice</code> extension.</div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="bgz-workflow-task-id">Aangemaakte workflow task id</label>
+                    <input type="text" id="bgz-workflow-task-id" name="bgz-workflow-task-id" autocomplete="off" maxlength="128" readonly>
+                    <div class="small-text" style="padding-top:0.25rem;">Dit is de sender workflow Task die bij het versturen is aangemaakt of bijgewerkt.</div>
+                </div>
+            </div>
         </div>
-        <div class="form-group">
-            <label for="bgz-oauth-endpoint">Nuts-OAuth endpoint</label>
-            <input type="text" id="bgz-oauth-endpoint" name="bgz-oauth-endpoint" autocomplete="off" maxlength="256" readonly>
-        </div>
-        <div class="form-group">
-            <label for="bgz-receiver-ura">Receiver URA</label>
-            <input type="text" id="bgz-receiver-ura" name="bgz-receiver-ura" autocomplete="off" maxlength="64" readonly>
-        </div>
-        <div class="form-group">
-            <label for="bgz-receiver-name">Receiver naam</label>
-            <input type="text" id="bgz-receiver-name" name="bgz-receiver-name" autocomplete="off" maxlength="128" readonly>
-        </div>
-    </div>
-
-    <div class="form-row">
-        <div class="form-group">
-            <label for="bgz-task-owner">Task.owner</label>
-            <input type="text" id="bgz-task-owner" name="bgz-task-owner" autocomplete="off" maxlength="128" readonly>
-            <div class="small-text" style="padding-top:0.25rem;">Wordt gebruikt door de ontvanger om intern te routeren naar het juiste organisatieonderdeel.</div>
-        </div>
-        <div class="form-group">
-            <label for="bgz-task-location">Task.location</label>
-            <input type="text" id="bgz-task-location" name="bgz-task-location" autocomplete="off" maxlength="128" readonly>
-            <div class="small-text" style="padding-top:0.25rem;">Optioneel. Alleen gevuld als er expliciet op locatie wordt geadresseerd.</div>
-        </div>
-        <div class="form-group">
-            <label for="bgz-task-healthcareservice">Task.HealthcareService</label>
-            <input type="text" id="bgz-task-healthcareservice" name="bgz-task-healthcareservice" autocomplete="off" maxlength="128" readonly>
-            <div class="small-text" style="padding-top:0.25rem;">Voor STU3 via de <code>task-stu3-healthcareservice</code> extension.</div>
-        </div>
+    </section>
+    <div class="visually-hidden" aria-hidden="true">
+        <label for="bgz-receiver-base">Receiver notification base</label>
+        <input type="text" id="bgz-receiver-base" name="bgz-receiver-base" autocomplete="off" maxlength="256" readonly>
+        <div class="small-text" id="bgz-endpoint-hint"></div>
     </div>
     <div class="actions">
         <button type="button" id="btn-bgz-notify" disabled>Verzend verwijzing</button>
         <span class="status-line" id="bgz-status"></span>
-    </div>
-
-    <div class="form-row">
-        <div class="form-group">
-            <label for="bgz-workflow-task-id">Aangemaakte workflow task id</label>
-            <input type="text" id="bgz-workflow-task-id" name="bgz-workflow-task-id" autocomplete="off" maxlength="128" readonly>
-            <div class="small-text" style="padding-top:0.25rem;">Dit is de sender workflow Task die bij het versturen is aangemaakt of bijgewerkt.</div>
-        </div>
     </div>
 
     <details id="debug-panel" style="margin-top:0.6rem; display:none;">
@@ -701,6 +794,8 @@
         let ownerRef = "";
         let locationRef = "";
         let healthcareServiceRef = "";
+        let locationIdentifierValue = "";
+        let healthcareServiceIdentifierValue = "";
 
         try {
             const tr = (lastPreflight && lastPreflight.task_routing) ? lastPreflight.task_routing : null;
@@ -713,12 +808,20 @@
             if (tr && tr.extension_healthcareservice_ref !== undefined && tr.extension_healthcareservice_ref !== null) {
                 healthcareServiceRef = String(tr.extension_healthcareservice_ref);
             }
+            if (tr && tr.extension_location_identifier_value !== undefined && tr.extension_location_identifier_value !== null) {
+                locationIdentifierValue = String(tr.extension_location_identifier_value);
+            }
+            if (tr && tr.extension_healthcareservice_identifier_value !== undefined && tr.extension_healthcareservice_identifier_value !== null) {
+                healthcareServiceIdentifierValue = String(tr.extension_healthcareservice_identifier_value);
+            }
         } catch (e) { /* ignore */ }
 
         return {
             ownerRef: sanitize(ownerRef || ""),
             locationRef: sanitize(locationRef || ""),
-            healthcareServiceRef: sanitize(healthcareServiceRef || "")
+            healthcareServiceRef: sanitize(healthcareServiceRef || ""),
+            locationIdentifierValue: sanitize(locationIdentifierValue || ""),
+            healthcareServiceIdentifierValue: sanitize(healthcareServiceIdentifierValue || "")
         };
     }
     function translateResourceType(resourceType) {
@@ -1047,8 +1150,8 @@
         // Dit is informatief; de backend blijft leidend.
         const taskRefs = deriveTaskRoutingRefs();
         if (taskOwnerEl) taskOwnerEl.value = taskRefs.ownerRef || "";
-        if (taskLocationEl) taskLocationEl.value = taskRefs.locationRef || "";
-        if (taskHealthcareServiceEl) taskHealthcareServiceEl.value = taskRefs.healthcareServiceRef || "";
+        if (taskLocationEl) taskLocationEl.value = taskRefs.locationIdentifierValue || taskRefs.locationRef || "";
+        if (taskHealthcareServiceEl) taskHealthcareServiceEl.value = taskRefs.healthcareServiceIdentifierValue || taskRefs.healthcareServiceRef || "";
 
         if (chosenEl) {
             chosenEl.value = (selectedEndpoint && selectedEndpoint.address) ? sanitize(selectedEndpoint.address) : "";
@@ -1228,6 +1331,9 @@
         }
         if (!("extension_healthcareservice_ref" in data.task_routing)) {
             throw new Error("Backend contract mismatch (preflight): 'task_routing.extension_healthcareservice_ref' ontbreekt.");
+        }
+        if (!("extension_healthcareservice_identifier_value" in data.task_routing)) {
+            throw new Error("Backend contract mismatch (preflight): 'task_routing.extension_healthcareservice_identifier_value' ontbreekt.");
         }
     }
 
