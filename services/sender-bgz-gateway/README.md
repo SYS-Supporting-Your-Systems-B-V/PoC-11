@@ -39,9 +39,10 @@ Key configuration:
 
 Current PoC behavior:
 
-- `Task/{id}` read requires a valid token, matching `organization_ura`, and matching `authorization-base`
-- `Task/{id}` only works for the actual sender workflow-task id; the notification itself carries `basedOn.identifier`, not a reusable sender `Task/{id}` reference
-- `Task?identifier=<system>|<value>` resolves exactly the geauthoriseerde workflow task when the requested identifier matches the `basedOn.identifier` from the notification
+- `Task/{id}` read requires a valid token, matching `organization_ura`, matching `authorization-base`, and a workflow task that is still `requested`
+- `Task/{id}` only works for the actual sender workflow-task id; arbitrary other sender `Task` ids are rejected
+- the current receiver flow reads the workflow task via `Task/{id}` using the sender workflow-task reference from the notification
+- `Task?identifier=<system>|<value>` remains available only for compatibility/testing and is no longer the primary documented receiver flow; it is likewise rejected once the workflow task is no longer `requested`
 - every sender data read/search must additionally match a path declared on the geauthoriseerde workflow task in `Task.input`
 - the gateway resolves the active workflow task from `Task.input[authorization-base]`; it does not use a repo-local `Task.identifier` shortcut for this
 - finding the workflow task by `authorization-base` is therefore only the first authorization step; it does not authorize arbitrary extra resources
@@ -50,7 +51,8 @@ Current PoC behavior:
 - patient-identifying data reads/searches additionally require `employee_identifier` and `employee_roles`
 - BGZ-style introspection aliases such as `user_id` and `user_role` are accepted and normalized to the same internal checks
 - if `BGZ_GATEWAY_MEDICAL_ROLE_CODES` is empty, the gateway still requires at least one non-empty `employee_roles` claim, but does not hardcode an arbitrary role-code list
-- `Task/{id}` update additionally requires the workflow task to remain active and preserves the stored `input.authorization-base` metadata on the outgoing PUT
+- `Task/{id}` update additionally requires the workflow task to remain active, only accepts `status`, and only allows `completed` or `failed`
+- `Task/{id}` update rejects any extra Task fields from the receiver; the gateway preserves the stored sender-side metadata on the outgoing PUT
 - DEZI claims for sender data access must come back through token introspection; the gateway does not accept a custom receiver-side DEZI header as a substitute
 
 When using `services/nuts-node/policies/BGZ_policy.json`:

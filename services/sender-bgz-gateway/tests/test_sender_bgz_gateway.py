@@ -348,6 +348,28 @@ def test_task_read_rejects_authorization_base_header_mismatch(monkeypatch):
     assert response.json()["detail"]["reason"] == "authorization_base_mismatch"
 
 
+def test_task_read_rejects_when_workflow_task_not_requested(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod, status="completed"))))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Task/wf-1", headers=_auth_headers())
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["detail"]["reason"] == "workflow_task_not_requested"
+    assert body["detail"]["task_status"] == "completed"
+    assert len(fake.calls) == 2
+
+
 def test_task_search_authorized_by_identifier(monkeypatch):
     appmod = _import_app_module()
     _set_gateway_settings(monkeypatch, appmod)
@@ -371,6 +393,30 @@ def test_task_search_authorized_by_identifier(monkeypatch):
     assert body["resourceType"] == "Bundle"
     assert body["total"] == 1
     assert body["entry"][0]["resource"]["id"] == "wf-1"
+
+
+def test_task_search_rejects_when_workflow_task_not_requested(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod, status="failed"))))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get(
+            "/fhir/Task?identifier=urn:ietf:rfc:3986|urn:uuid:11111111-1111-1111-1111-111111111111",
+            headers=_auth_headers(),
+        )
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["detail"]["reason"] == "workflow_task_not_requested"
+    assert body["detail"]["task_status"] == "failed"
 
 
 def test_task_search_returns_empty_bundle_for_identifier_mismatch(monkeypatch):
@@ -674,6 +720,106 @@ def test_task_update_preserves_authorization_base(monkeypatch):
         and item.get("valueString") == "auth-123"
         for item in upstream_payload["input"]
     )
+
+
+def test_task_update_accepts_failed_status(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod, status="requested"))))
+    fake.queue("PUT", "http://upstream/fhir/Task/wf-1", DummyResponse(200, _workflow_task(appmod, status="failed")))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.put(
+            "/fhir/Task/wf-1",
+            headers=_auth_headers(),
+            json={"resourceType": "Task", "id": "wf-1", "status": "failed"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert fake.calls[2]["json"]["status"] == "failed"
+
+
+def test_task_update_rejects_missing_status(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod, status="requested"))))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.put(
+            "/fhir/Task/wf-1",
+            headers=_auth_headers(),
+            json={"resourceType": "Task", "id": "wf-1"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["reason"] == "missing_task_status"
+
+
+def test_task_update_rejects_status_outside_close_or_fail(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod, status="requested"))))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.put(
+            "/fhir/Task/wf-1",
+            headers=_auth_headers(),
+            json={"resourceType": "Task", "id": "wf-1", "status": "in-progress"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["reason"] == "task_status_not_allowed"
+
+
+def test_task_update_rejects_extra_task_fields(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod, status="requested"))))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.put(
+            "/fhir/Task/wf-1",
+            headers=_auth_headers(),
+            json={
+                "resourceType": "Task",
+                "id": "wf-1",
+                "status": "completed",
+                "statusReason": {"text": "unexpected"},
+            },
+        )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["reason"] == "unsupported_task_update_fields"
+    assert body["detail"]["unexpected_fields"] == ["statusReason"]
 
 
 def test_patient_search_logs_authorization_upstream_and_response_flow(monkeypatch, caplog):

@@ -61,6 +61,8 @@ TERMINAL_TASK_STATUSES = {
     "failed",
     "rejected",
 }
+ALLOWED_TASK_UPDATE_REQUEST_FIELDS = {"resourceType", "id", "status"}
+ALLOWED_TASK_UPDATE_STATUSES = {"completed", "failed"}
 REQUEST_LOG_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar("sender_bgz_gateway_request_log_context", default=None)
 
 
@@ -521,11 +523,31 @@ def _task_has_authorization_base(task: dict[str, Any], authorization_base: str) 
     return False
 
 
+def _task_status(task: dict[str, Any]) -> str:
+    return str(task.get("status") or "").strip().lower()
+
+
 def _task_is_active(task: dict[str, Any]) -> bool:
-    status = str(task.get("status") or "").strip().lower()
+    status = _task_status(task)
     if not status:
         return False
     return status not in TERMINAL_TASK_STATUSES
+
+
+def _task_is_requested(task: dict[str, Any]) -> bool:
+    return _task_status(task) == "requested"
+
+
+def _ensure_task_requested_for_fetch(task: dict[str, Any]) -> None:
+    status = str(task.get("status") or "").strip() or None
+    if _task_is_requested(task):
+        return
+    _raise_http(
+        403,
+        "workflow_task_not_requested",
+        "Workflow task kan niet meer worden opgehaald omdat de status niet meer 'requested' is.",
+        task_status=status,
+    )
 
 
 def _task_input_codings(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -752,11 +774,27 @@ def _filter_bundle_to_patient(bundle: dict[str, Any], *, primary_type: str, pati
 
 
 def _ensure_task_update_payload(existing_task: dict[str, Any], incoming_task: dict[str, Any], authorization_base: str) -> dict[str, Any]:
+    unexpected_fields = sorted(str(field) for field in incoming_task.keys() if str(field) not in ALLOWED_TASK_UPDATE_REQUEST_FIELDS)
+    if unexpected_fields:
+        _raise_http(
+            400,
+            "unsupported_task_update_fields",
+            "Task update mag alleen resourceType, id en status bevatten.",
+            unexpected_fields=unexpected_fields,
+        )
+    if "status" not in incoming_task:
+        _raise_http(400, "missing_task_status", "Task update moet een status bevatten.")
+    next_status = str(incoming_task.get("status") or "").strip().lower()
+    if next_status not in ALLOWED_TASK_UPDATE_STATUSES:
+        _raise_http(
+            400,
+            "task_status_not_allowed",
+            "Task update status moet 'completed' of 'failed' zijn.",
+            allowed_statuses=sorted(ALLOWED_TASK_UPDATE_STATUSES),
+            received_status=incoming_task.get("status"),
+        )
     updated = copy.deepcopy(existing_task)
-    allowed_mutable_fields = {"status", "businessStatus", "statusReason"}
-    for field in allowed_mutable_fields:
-        if field in incoming_task:
-            updated[field] = copy.deepcopy(incoming_task[field])
+    updated["status"] = next_status
     updated["resourceType"] = "Task"
     updated["id"] = str(existing_task.get("id") or "")
     updated["identifier"] = [
@@ -991,7 +1029,13 @@ async def _introspect_token(token: str) -> TokenContext:
     return ctx
 
 
-async def _authorize_request(request: Request, *, require_professional: bool, require_active_task: bool) -> WorkflowAuthorization:
+async def _authorize_request(
+    request: Request,
+    *,
+    require_professional: bool,
+    require_active_task: bool,
+    require_requested_task: bool = False,
+) -> WorkflowAuthorization:
     auth_header = str(request.headers.get("Authorization") or "").strip()
     if not auth_header.lower().startswith("bearer "):
         _raise_http(401, "missing_bearer_token", "Authorization header met Bearer token is verplicht.")
@@ -1008,6 +1052,7 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
         request_authorization_base=request_authorization_base or None,
         require_professional=require_professional,
         require_active_task=require_active_task,
+        require_requested_task=require_requested_task,
     )
     token_ctx = await _introspect_token(token)
     auth_steps.append("token_introspection_active")
@@ -1088,6 +1133,9 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
             task_owner_ura=task_owner_ura or None,
         )
     auth_steps.append("organization_matches_task_owner")
+    if require_requested_task:
+        _ensure_task_requested_for_fetch(task)
+        auth_steps.append("workflow_task_requested")
     if require_active_task and not _task_is_active(task):
         _raise_http(403, "workflow_task_not_active", "Workflow task is niet actief voor deze update.")
     if require_active_task:
@@ -1244,7 +1292,12 @@ async def metadata(request: Request) -> Response:
 
 @app.get("/fhir/Task/{task_id}")
 async def read_workflow_task(task_id: str, request: Request) -> Response:
-    authz = await _authorize_request(request, require_professional=False, require_active_task=False)
+    authz = await _authorize_request(
+        request,
+        require_professional=False,
+        require_active_task=False,
+        require_requested_task=True,
+    )
     if task_id != authz.task_id:
         _raise_http(403, "task_id_not_authorized", "Opgevraagde Task id hoort niet bij de geautoriseerde workflow task.")
     url = _join_url(settings.upstream_fhir_base, f"Task/{task_id}")
@@ -1263,13 +1316,19 @@ async def read_workflow_task(task_id: str, request: Request) -> Response:
         _raise_http(502, "upstream_task_invalid", "Interne FHIR server gaf een ongeldige Task terug.")
     if not _task_has_authorization_base(payload, authz.token.authorization_base):
         _raise_http(403, "task_authorization_mismatch", "Opgevraagde Task hoort niet bij authorization-base.")
+    _ensure_task_requested_for_fetch(payload)
     return _json_response(payload, headers=_response_headers(response), response_source="task-read")
 
 
 @app.get("/fhir/Task")
 async def search_workflow_task(request: Request) -> Response:
     identifier_system, identifier_value = _request_task_identifier(request)
-    authz = await _authorize_request(request, require_professional=False, require_active_task=False)
+    authz = await _authorize_request(
+        request,
+        require_professional=False,
+        require_active_task=False,
+        require_requested_task=True,
+    )
     if not _has_identifier(authz.task, system=identifier_system, value=identifier_value):
         _log_event(
             logging.INFO,
