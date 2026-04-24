@@ -3,10 +3,14 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import time
+from collections import Counter
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit
+from uuid import uuid4
 
 import httpx
 import uvicorn
@@ -57,6 +61,7 @@ TERMINAL_TASK_STATUSES = {
     "failed",
     "rejected",
 }
+REQUEST_LOG_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar("sender_bgz_gateway_request_log_context", default=None)
 
 
 def _normalize_fhir_base(base: str) -> str:
@@ -197,11 +202,116 @@ def _response_headers(response: httpx.Response) -> dict[str, str]:
     return headers
 
 
+def _log_value(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=isinstance(value, dict))
+    except Exception:
+        return json.dumps(str(value), ensure_ascii=True)
+
+
+def _truncate_log_text(text: str) -> str:
+    limit = max(int(getattr(settings, "log_preview_chars", 2000) or 2000), 200)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...(truncated {len(text) - limit} chars)"
+
+
+def _token_preview(token: str) -> str:
+    raw = str(token or "").strip()
+    if not raw:
+        return ""
+    if settings.log_sensitive_data:
+        return _truncate_log_text(raw)
+    if len(raw) <= 12:
+        return "<redacted>"
+    return f"{raw[:8]}...{raw[-4:]}"
+
+
+def _payload_log_preview(payload: Any) -> Any:
+    if payload is None:
+        return None
+    if settings.log_sensitive_data:
+        if isinstance(payload, (dict, list, tuple)):
+            return _truncate_log_text(_log_value(payload))
+        if isinstance(payload, (bytes, bytearray)):
+            return f"<{len(payload)} bytes>"
+        return _truncate_log_text(str(payload))
+
+    if isinstance(payload, dict):
+        summary: dict[str, Any] = {}
+        for key in (
+            "resourceType",
+            "id",
+            "status",
+            "type",
+            "total",
+            "active",
+            "organization_ura",
+            "employee_identifier",
+            "employee_roles",
+            "scope",
+            "authorization-base",
+            "authorization_base",
+        ):
+            if key in payload:
+                summary[key] = payload.get(key)
+        if isinstance(payload.get("entry"), list):
+            summary["entry_count"] = len(payload["entry"])
+        if not summary:
+            summary["keys"] = sorted(str(key) for key in payload.keys())[:12]
+        return summary
+    if isinstance(payload, (list, tuple)):
+        return {"item_count": len(payload)}
+    if isinstance(payload, (bytes, bytearray)):
+        return f"<{len(payload)} bytes>"
+    if isinstance(payload, str) and payload:
+        return "<suppressed>"
+    return payload
+
+
+def _response_log_preview(response: httpx.Response) -> Any:
+    if _is_json_response(response):
+        try:
+            return _payload_log_preview(response.json())
+        except Exception:
+            return _truncate_log_text(response.text) if settings.log_sensitive_data else "<invalid-json>"
+    content_type = str(response.headers.get("content-type") or "").strip()
+    if response.text:
+        return _truncate_log_text(response.text) if settings.log_sensitive_data else "<suppressed>"
+    if response.content:
+        return f"<{len(response.content)} bytes>"
+    return {"content_type": content_type or None}
+
+
+def _log_event(level: int, message: str, **fields: Any) -> None:
+    merged: dict[str, Any] = {}
+    context = REQUEST_LOG_CONTEXT.get() or {}
+    for key, value in context.items():
+        if value not in (None, "", [], {}, ()):
+            merged[key] = value
+    for key, value in fields.items():
+        if value not in (None, "", [], {}, ()):
+            merged[key] = value
+    if not merged:
+        logger.log(level, message)
+        return
+    suffix = " ".join(f"{key}={_log_value(value)}" for key, value in merged.items())
+    logger.log(level, "%s %s", message, suffix)
+
+
 def _raise_http(status_code: int, reason: str, message: str, **extra: Any) -> None:
     detail: dict[str, Any] = {"reason": reason, "message": message}
     for key, value in extra.items():
         if value is not None:
             detail[key] = value
+    _log_event(
+        logging.WARNING,
+        "Gateway request rejected",
+        status_code=status_code,
+        reason=reason,
+        error_message=message,
+        detail=detail,
+    )
     raise HTTPException(status_code=status_code, detail=detail)
 
 
@@ -493,10 +603,24 @@ def _workflow_task_allows_path(
     relative_path: str,
     query_items: Optional[Iterable[tuple[str, str]]] = None,
 ) -> bool:
-    requested = _canonical_relative_fhir_path(relative_path, query_items=query_items)
-    if not requested:
+    requested_path = _normalize_relative_fhir_path(relative_path)
+    if not requested_path:
         return False
-    return requested in set(_workflow_task_authorized_paths(task))
+    requested_items = list(query_items or parse_qsl(urlsplit(str(relative_path or "").strip()).query, keep_blank_values=True))
+    requested_counts = Counter((str(key), str(value)) for key, value in requested_items)
+    for allowed in _workflow_task_authorized_paths(task):
+        allowed_path = _normalize_relative_fhir_path(allowed)
+        if allowed_path != requested_path:
+            continue
+        allowed_items = parse_qsl(urlsplit(allowed).query, keep_blank_values=True)
+        allowed_counts = Counter((str(key), str(value)) for key, value in allowed_items)
+        if any(requested_counts[item] < count for item, count in allowed_counts.items()):
+            continue
+        allowed_control_keys = {str(key) for key, _ in allowed_items if str(key).startswith("_")}
+        if any(str(key).startswith("_") and str(key) not in allowed_control_keys for key, _ in requested_items):
+            continue
+        return True
+    return False
 
 
 def _ensure_requested_path_authorized(
@@ -505,15 +629,23 @@ def _ensure_requested_path_authorized(
     relative_path: str,
     query_items: Optional[Iterable[tuple[str, str]]] = None,
 ) -> None:
-    if _workflow_task_allows_path(task, relative_path=relative_path, query_items=query_items):
-        return
     requested = _canonical_relative_fhir_path(relative_path, query_items=query_items)
+    authorized_paths = list(_workflow_task_authorized_paths(task))
+    if _workflow_task_allows_path(task, relative_path=relative_path, query_items=query_items):
+        _log_event(
+            logging.INFO,
+            "Workflow task path authorized",
+            task_id=str(task.get("id") or "").strip() or None,
+            requested_path=requested or None,
+            authorized_paths=authorized_paths,
+        )
+        return
     _raise_http(
         403,
         "workflow_task_input_not_authorized",
         "Opgevraagde FHIR route staat niet op de geautoriseerde workflow task.",
         requested_path=requested or None,
-        authorized_paths=list(_workflow_task_authorized_paths(task)),
+        authorized_paths=authorized_paths,
     )
 
 
@@ -563,6 +695,7 @@ def _filter_bundle_to_patient(bundle: dict[str, Any], *, primary_type: str, pati
     if str(bundle.get("resourceType") or "") != "Bundle":
         return bundle
 
+    original_entry_count = len(bundle.get("entry") or [])
     kept_primary: list[dict[str, Any]] = []
     include_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for entry in _iter_bundle_entries(bundle):
@@ -604,6 +737,17 @@ def _filter_bundle_to_patient(bundle: dict[str, Any], *, primary_type: str, pati
     filtered = copy.deepcopy(bundle)
     filtered["entry"] = kept_entries
     filtered["total"] = len(kept_primary)
+    _log_event(
+        logging.INFO,
+        "Filtered upstream bundle to authorized patient context",
+        primary_type=primary_type,
+        patient_id=patient_id,
+        patient_bsn=patient_bsn,
+        original_entry_count=original_entry_count,
+        kept_primary_count=len(kept_primary),
+        kept_entry_count=len(kept_entries),
+        dropped_entry_count=max(original_entry_count - len(kept_entries), 0),
+    )
     return filtered
 
 
@@ -674,11 +818,105 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Sender BgZ Gateway", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = uuid4().hex[:8]
+    started = time.perf_counter()
+    context = {
+        "request_id": request_id,
+        "method": request.method,
+        "path": request.url.path,
+        "query": request.url.query or None,
+    }
+    request.state.request_id = request_id
+    token = REQUEST_LOG_CONTEXT.set(context)
+    _log_event(logging.INFO, "Gateway request received")
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "Gateway request failed unexpectedly %s",
+            " ".join(f"{key}={_log_value(value)}" for key, value in context.items() if value is not None),
+        )
+        REQUEST_LOG_CONTEXT.reset(token)
+        raise
+    response.headers.setdefault("X-Request-Id", request_id)
+    _log_event(
+        logging.INFO,
+        "Gateway request finished",
+        status_code=response.status_code,
+        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+    )
+    REQUEST_LOG_CONTEXT.reset(token)
+    return response
+
+
+async def _http_request(
+    *,
+    upstream_name: str,
+    method: str,
+    url: str,
+    params: list[tuple[str, str]] | None = None,
+    headers: dict[str, str] | None = None,
+    json_body: Any = None,
+    data: Any = None,
+    timeout: float | None = None,
+) -> httpx.Response:
+    request_kwargs: dict[str, Any] = {}
+    if params is not None:
+        request_kwargs["params"] = params
+    if headers is not None:
+        request_kwargs["headers"] = headers
+    if json_body is not None:
+        request_kwargs["json"] = json_body
+    if data is not None:
+        request_kwargs["data"] = data
+    if timeout is not None:
+        request_kwargs["timeout"] = timeout
+
+    _log_event(
+        logging.INFO,
+        "Upstream request",
+        upstream_name=upstream_name,
+        upstream_method=method.upper(),
+        upstream_url=url,
+        upstream_params=params,
+        upstream_headers=headers,
+        upstream_body=_payload_log_preview(data if data is not None else json_body),
+    )
+    try:
+        response = await app.state.http_client.request(method.upper(), url, **request_kwargs)
+    except httpx.HTTPError as exc:
+        _log_event(
+            logging.ERROR,
+            "Upstream request failed",
+            upstream_name=upstream_name,
+            upstream_method=method.upper(),
+            upstream_url=url,
+            error=str(exc),
+        )
+        raise
+
+    _log_event(
+        logging.INFO,
+        "Upstream response",
+        upstream_name=upstream_name,
+        upstream_method=method.upper(),
+        upstream_url=url,
+        status_code=response.status_code,
+        response_headers=_response_headers(response) or {"content-type": response.headers.get("content-type")},
+        response_body=_response_log_preview(response),
+    )
+    return response
+
+
 async def _upstream_get_json(path: str, *, params: list[tuple[str, str]] | None = None) -> dict[str, Any]:
     url = _join_url(settings.upstream_fhir_base, path)
     try:
-        response = await app.state.http_client.get(
-            url,
+        response = await _http_request(
+            upstream_name="internal-fhir",
+            method="GET",
+            url=url,
             params=params,
             headers={"Accept": "application/fhir+json"},
         )
@@ -706,8 +944,10 @@ async def _upstream_get_json(path: str, *, params: list[tuple[str, str]] | None 
 async def _introspect_token(token: str) -> TokenContext:
     url = _join_url(settings.nuts_internal_base, "/internal/auth/v2/accesstoken/introspect")
     try:
-        response = await app.state.http_client.post(
-            url,
+        response = await _http_request(
+            upstream_name="nuts-introspection",
+            method="POST",
+            url=url,
             data={"token": token},
             headers={"Accept": "application/json"},
             timeout=settings.introspection_timeout,
@@ -736,6 +976,18 @@ async def _introspect_token(token: str) -> TokenContext:
         _raise_http(401, "inactive_token", "Toegangstoken is niet actief of niet geldig.")
     if not ctx.organization_ura:
         _raise_http(403, "missing_organization_ura", "Introspectie mist organization_ura.")
+    _log_event(
+        logging.INFO,
+        "Token introspection accepted",
+        token=_token_preview(token),
+        active=ctx.active,
+        organization_ura=ctx.organization_ura,
+        subject_id=ctx.subject_id or None,
+        authorization_base=ctx.authorization_base or None,
+        employee_identifier=ctx.employee_identifier or None,
+        employee_roles=ctx.employee_roles,
+        scopes=ctx.scopes,
+    )
     return ctx
 
 
@@ -747,8 +999,18 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
     if not token:
         _raise_http(401, "missing_bearer_token", "Bearer token ontbreekt.")
 
-    token_ctx = await _introspect_token(token)
+    auth_steps = ["bearer_token_present"]
     request_authorization_base = _request_authorization_base(request)
+    _log_event(
+        logging.INFO,
+        "Authorization started",
+        token=_token_preview(token),
+        request_authorization_base=request_authorization_base or None,
+        require_professional=require_professional,
+        require_active_task=require_active_task,
+    )
+    token_ctx = await _introspect_token(token)
+    auth_steps.append("token_introspection_active")
     if token_ctx.authorization_base and request_authorization_base and request_authorization_base != token_ctx.authorization_base:
         _raise_http(
             403,
@@ -761,11 +1023,18 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
         if not request_authorization_base:
             _raise_http(403, "missing_authorization_base", "Introspectie mist authorization-base claim.")
         token_ctx.authorization_base = request_authorization_base
+        auth_steps.append("authorization_base_from_request_header")
+    elif request_authorization_base:
+        auth_steps.append("authorization_base_header_matches_token")
+    else:
+        auth_steps.append("authorization_base_from_introspection")
     if require_professional:
         if not token_ctx.employee_identifier:
             _raise_http(403, "missing_employee_identifier", "Introspectie mist employee_identifier.")
+        auth_steps.append("employee_identifier_present")
         if not token_ctx.employee_roles:
             _raise_http(403, "missing_employee_roles", "Introspectie mist employee_roles.")
+        auth_steps.append("employee_roles_present")
         if MEDICAL_ROLE_CODES and not set(token_ctx.employee_roles).intersection(MEDICAL_ROLE_CODES):
             _raise_http(
                 403,
@@ -774,6 +1043,8 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
                 allowed_roles=MEDICAL_ROLE_CODES,
                 received_roles=token_ctx.employee_roles,
             )
+        if MEDICAL_ROLE_CODES:
+            auth_steps.append("employee_roles_allowlist_match")
         if REQUIRED_SCOPES and not set(token_ctx.scopes).intersection(REQUIRED_SCOPES):
             _raise_http(
                 403,
@@ -782,6 +1053,8 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
                 allowed_scopes=REQUIRED_SCOPES,
                 received_scopes=token_ctx.scopes,
             )
+        if REQUIRED_SCOPES:
+            auth_steps.append("required_scope_match")
 
     bundle = await _upstream_get_json(
         "Task",
@@ -792,11 +1065,18 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
         for task in _bundle_resources(bundle, "Task")
         if _task_has_authorization_base(task, token_ctx.authorization_base)
     ]
+    _log_event(
+        logging.INFO,
+        "Workflow task lookup evaluated",
+        authorization_base=token_ctx.authorization_base,
+        matching_task_ids=[str(task.get("id") or "").strip() for task in tasks],
+    )
     if not tasks:
         _raise_http(403, "workflow_task_not_found", "Geen workflow task gevonden voor authorization-base.")
     if len(tasks) > 1:
         _raise_http(409, "workflow_task_not_unique", "Meerdere workflow tasks gevonden voor authorization-base.")
     task = tasks[0]
+    auth_steps.append("workflow_task_found")
     task_owner_ura = _extract_task_owner_ura(task)
     if not task_owner_ura or task_owner_ura not in {token_ctx.organization_ura, token_ctx.subject_id}:
         _raise_http(
@@ -807,16 +1087,40 @@ async def _authorize_request(request: Request, *, require_professional: bool, re
             token_subject_id=token_ctx.subject_id or None,
             task_owner_ura=task_owner_ura or None,
         )
+    auth_steps.append("organization_matches_task_owner")
     if require_active_task and not _task_is_active(task):
         _raise_http(403, "workflow_task_not_active", "Workflow task is niet actief voor deze update.")
+    if require_active_task:
+        auth_steps.append("workflow_task_active")
     patient_bsn = _extract_task_patient_bsn(task)
     if not patient_bsn:
         _raise_http(500, "workflow_task_missing_patient", "Workflow task bevat geen patiëntidentificatie.")
+    auth_steps.append("workflow_task_patient_identified")
+    _log_event(
+        logging.INFO,
+        "Gateway request authorized",
+        token=_token_preview(token),
+        authorization_base=token_ctx.authorization_base,
+        task_id=str(task.get("id") or "").strip() or None,
+        task_owner_ura=task_owner_ura or None,
+        patient_bsn=patient_bsn,
+        employee_identifier=token_ctx.employee_identifier or None,
+        employee_roles=token_ctx.employee_roles,
+        scopes=token_ctx.scopes,
+        authorized_paths=list(_workflow_task_authorized_paths(task)),
+        auth_steps=auth_steps,
+    )
     return WorkflowAuthorization(token=token_ctx, task=task, patient_bsn=patient_bsn)
 
 
 async def _ensure_patient_loaded(authz: WorkflowAuthorization) -> WorkflowAuthorization:
     if authz.patient_resource is not None:
+        _log_event(
+            logging.INFO,
+            "Authorized patient already cached",
+            patient_id=authz.patient_id or None,
+            patient_bsn=authz.patient_bsn,
+        )
         return authz
     bundle = await _upstream_get_json(
         "Patient",
@@ -839,6 +1143,12 @@ async def _ensure_patient_loaded(authz: WorkflowAuthorization) -> WorkflowAuthor
     if len(patients) > 1:
         _raise_http(409, "authorized_patient_not_unique", "Meerdere patiënten gevonden voor de geautoriseerde BSN.")
     authz.patient_resource = patients[0]
+    _log_event(
+        logging.INFO,
+        "Authorized patient loaded",
+        patient_id=authz.patient_id or None,
+        patient_bsn=authz.patient_bsn,
+    )
     return authz
 
 
@@ -847,20 +1157,60 @@ def _patient_scoped_params(resource_type: str, request: Request, patient_id: str
     if resource_type == "Patient":
         items = [(key, value) for key, value in items if key != "identifier"]
         items.append(("identifier", f"{settings.patient_identifier_system}|{patient_bsn}"))
+        _log_event(
+            logging.INFO,
+            "Applied patient scope to upstream request",
+            resource_type=resource_type,
+            original_query=list(request.query_params.multi_items()),
+            upstream_query=items,
+            patient_id=patient_id,
+            patient_bsn=patient_bsn,
+        )
         return items
 
     items = [(key, value) for key, value in items if key not in {"patient", "subject"}]
     items.append(("patient", patient_id))
+    _log_event(
+        logging.INFO,
+        "Applied patient scope to upstream request",
+        resource_type=resource_type,
+        original_query=list(request.query_params.multi_items()),
+        upstream_query=items,
+        patient_id=patient_id,
+        patient_bsn=patient_bsn,
+    )
     return items
 
 
-def _json_response(payload: dict[str, Any], *, status_code: int = 200, headers: dict[str, str] | None = None) -> JSONResponse:
+def _json_response(
+    payload: dict[str, Any],
+    *,
+    status_code: int = 200,
+    headers: dict[str, str] | None = None,
+    response_source: str = "gateway-json",
+) -> JSONResponse:
     out_headers = dict(headers or {})
     out_headers["Content-Type"] = "application/fhir+json"
+    _log_event(
+        logging.INFO,
+        "Gateway response prepared",
+        response_source=response_source,
+        status_code=status_code,
+        response_headers=out_headers,
+        response_body=_payload_log_preview(payload),
+    )
     return JSONResponse(content=payload, status_code=status_code, headers=out_headers)
 
 
-def _pass_through_response(response: httpx.Response) -> Response:
+def _pass_through_response(response: httpx.Response, *, response_source: str = "upstream-pass-through") -> Response:
+    _log_event(
+        logging.INFO,
+        "Gateway response prepared",
+        response_source=response_source,
+        status_code=response.status_code,
+        response_headers=_response_headers(response),
+        response_body=_response_log_preview(response),
+    )
     return Response(
         content=response.content,
         status_code=response.status_code,
@@ -882,12 +1232,14 @@ async def health() -> dict[str, Any]:
 @app.get("/fhir/metadata")
 async def metadata(request: Request) -> Response:
     url = _join_url(settings.upstream_fhir_base, "metadata")
-    response = await app.state.http_client.get(
-        url,
+    response = await _http_request(
+        upstream_name="internal-fhir",
+        method="GET",
+        url=url,
         headers=_proxy_headers_from_request(request),
         params=list(request.query_params.multi_items()),
     )
-    return _pass_through_response(response)
+    return _pass_through_response(response, response_source="metadata-pass-through")
 
 
 @app.get("/fhir/Task/{task_id}")
@@ -896,17 +1248,22 @@ async def read_workflow_task(task_id: str, request: Request) -> Response:
     if task_id != authz.task_id:
         _raise_http(403, "task_id_not_authorized", "Opgevraagde Task id hoort niet bij de geautoriseerde workflow task.")
     url = _join_url(settings.upstream_fhir_base, f"Task/{task_id}")
-    response = await app.state.http_client.get(url, headers=_proxy_headers_from_request(request))
+    response = await _http_request(
+        upstream_name="internal-fhir",
+        method="GET",
+        url=url,
+        headers=_proxy_headers_from_request(request),
+    )
     if response.status_code >= 400:
-        return _pass_through_response(response)
+        return _pass_through_response(response, response_source="task-read-pass-through")
     if not _is_json_response(response):
-        return _pass_through_response(response)
+        return _pass_through_response(response, response_source="task-read-pass-through")
     payload = response.json()
     if not isinstance(payload, dict) or str(payload.get("id") or "") != task_id:
         _raise_http(502, "upstream_task_invalid", "Interne FHIR server gaf een ongeldige Task terug.")
     if not _task_has_authorization_base(payload, authz.token.authorization_base):
         _raise_http(403, "task_authorization_mismatch", "Opgevraagde Task hoort niet bij authorization-base.")
-    return _json_response(payload, headers=_response_headers(response))
+    return _json_response(payload, headers=_response_headers(response), response_source="task-read")
 
 
 @app.get("/fhir/Task")
@@ -914,14 +1271,32 @@ async def search_workflow_task(request: Request) -> Response:
     identifier_system, identifier_value = _request_task_identifier(request)
     authz = await _authorize_request(request, require_professional=False, require_active_task=False)
     if not _has_identifier(authz.task, system=identifier_system, value=identifier_value):
-        return _json_response({"resourceType": "Bundle", "type": "searchset", "total": 0, "entry": []})
+        _log_event(
+            logging.INFO,
+            "Workflow task identifier search returned no match",
+            identifier_system=identifier_system,
+            identifier_value=identifier_value,
+            task_id=authz.task_id or None,
+        )
+        return _json_response(
+            {"resourceType": "Bundle", "type": "searchset", "total": 0, "entry": []},
+            response_source="task-search-empty",
+        )
+    _log_event(
+        logging.INFO,
+        "Workflow task identifier search matched authorized task",
+        identifier_system=identifier_system,
+        identifier_value=identifier_value,
+        task_id=authz.task_id or None,
+    )
     return _json_response(
         {
             "resourceType": "Bundle",
             "type": "searchset",
             "total": 1,
             "entry": [{"resource": authz.task}],
-        }
+        },
+        response_source="task-search",
     )
 
 
@@ -942,16 +1317,29 @@ async def update_workflow_task(task_id: str, request: Request) -> Response:
         _raise_http(400, "task_id_mismatch", "Task id in body matcht niet met de URL.")
 
     payload = _ensure_task_update_payload(authz.task, incoming, authz.token.authorization_base)
+    _log_event(
+        logging.INFO,
+        "Prepared workflow task update payload",
+        task_id=task_id,
+        incoming_body=_payload_log_preview(incoming),
+        upstream_body=_payload_log_preview(payload),
+    )
     url = _join_url(settings.upstream_fhir_base, f"Task/{task_id}")
     headers = _proxy_headers_from_request(request)
     headers["Content-Type"] = "application/fhir+json"
-    response = await app.state.http_client.put(url, json=payload, headers=headers)
+    response = await _http_request(
+        upstream_name="internal-fhir",
+        method="PUT",
+        url=url,
+        json_body=payload,
+        headers=headers,
+    )
     if response.status_code >= 400 or not _is_json_response(response):
-        return _pass_through_response(response)
+        return _pass_through_response(response, response_source="task-update-pass-through")
     body = response.json()
     if not isinstance(body, dict):
         _raise_http(502, "upstream_task_invalid", "Interne FHIR server gaf een ongeldige Task terug.")
-    return _json_response(body, status_code=response.status_code, headers=_response_headers(response))
+    return _json_response(body, status_code=response.status_code, headers=_response_headers(response), response_source="task-update")
 
 
 @app.get("/fhir/Observation/$lastn")
@@ -965,14 +1353,20 @@ async def observation_lastn(request: Request) -> Response:
     authz = await _ensure_patient_loaded(authz)
     params = _patient_scoped_params("Observation", request, authz.patient_id, authz.patient_bsn)
     url = _join_url(settings.upstream_fhir_base, "Observation/$lastn")
-    response = await app.state.http_client.get(url, params=params, headers=_proxy_headers_from_request(request))
+    response = await _http_request(
+        upstream_name="internal-fhir",
+        method="GET",
+        url=url,
+        params=params,
+        headers=_proxy_headers_from_request(request),
+    )
     if response.status_code >= 400 or not _is_json_response(response):
-        return _pass_through_response(response)
+        return _pass_through_response(response, response_source="observation-lastn-pass-through")
     payload = response.json()
     if isinstance(payload, dict):
         payload = _filter_bundle_to_patient(payload, primary_type="Observation", patient_id=authz.patient_id, patient_bsn=authz.patient_bsn)
-        return _json_response(payload, headers=_response_headers(response))
-    return _pass_through_response(response)
+        return _json_response(payload, headers=_response_headers(response), response_source="observation-lastn")
+    return _pass_through_response(response, response_source="observation-lastn-pass-through")
 
 
 @app.get("/fhir/{resource_type}")
@@ -991,15 +1385,21 @@ async def search_resource(resource_type: str, request: Request) -> Response:
     authz = await _ensure_patient_loaded(authz)
     params = _patient_scoped_params(resource_type, request, authz.patient_id, authz.patient_bsn)
     url = _join_url(settings.upstream_fhir_base, resource_type)
-    response = await app.state.http_client.get(url, params=params, headers=_proxy_headers_from_request(request))
+    response = await _http_request(
+        upstream_name="internal-fhir",
+        method="GET",
+        url=url,
+        params=params,
+        headers=_proxy_headers_from_request(request),
+    )
     if response.status_code >= 400 or not _is_json_response(response):
-        return _pass_through_response(response)
+        return _pass_through_response(response, response_source=f"{resource_type}-search-pass-through")
 
     payload = response.json()
     if isinstance(payload, dict):
         payload = _filter_bundle_to_patient(payload, primary_type=resource_type, patient_id=authz.patient_id, patient_bsn=authz.patient_bsn)
-        return _json_response(payload, headers=_response_headers(response))
-    return _pass_through_response(response)
+        return _json_response(payload, headers=_response_headers(response), response_source=f"{resource_type}-search")
+    return _pass_through_response(response, response_source=f"{resource_type}-search-pass-through")
 
 
 @app.get("/fhir/{resource_type}/{resource_id}")
@@ -1017,18 +1417,23 @@ async def read_resource(resource_type: str, resource_id: str, request: Request) 
     authz = await _ensure_patient_loaded(authz)
 
     url = _join_url(settings.upstream_fhir_base, f"{resource_type}/{resource_id}")
-    response = await app.state.http_client.get(url, headers=_proxy_headers_from_request(request))
+    response = await _http_request(
+        upstream_name="internal-fhir",
+        method="GET",
+        url=url,
+        headers=_proxy_headers_from_request(request),
+    )
     if response.status_code >= 400:
-        return _pass_through_response(response)
+        return _pass_through_response(response, response_source=f"{resource_type}-read-pass-through")
     if not _is_json_response(response):
-        return _pass_through_response(response)
+        return _pass_through_response(response, response_source=f"{resource_type}-read-pass-through")
 
     payload = response.json()
     if not isinstance(payload, dict):
         _raise_http(502, "upstream_resource_invalid", "Interne FHIR server gaf geen geldige resource JSON terug.")
     if not _resource_matches_patient(payload, patient_id=authz.patient_id, patient_bsn=authz.patient_bsn):
         _raise_http(403, "resource_not_authorized", "FHIR resource hoort niet bij de geautoriseerde patiëntcontext.")
-    return _json_response(payload, headers=_response_headers(response))
+    return _json_response(payload, headers=_response_headers(response), response_source=f"{resource_type}-read")
 
 
 if __name__ == "__main__":

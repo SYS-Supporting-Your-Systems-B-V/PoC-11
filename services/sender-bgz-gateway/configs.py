@@ -12,6 +12,7 @@ logger = logging.getLogger("sender_bgz_gateway.app")
 
 
 class Settings(BaseSettings):
+    is_production: bool = Field(False, validation_alias="BGZ_GATEWAY_IS_PRODUCTION")
     host: str = Field("0.0.0.0", validation_alias="BGZ_GATEWAY_HOST")
     port: int = Field(8001, validation_alias="BGZ_GATEWAY_PORT")
     upstream_fhir_base: str = Field(
@@ -37,6 +38,8 @@ class Settings(BaseSettings):
     verify_tls: bool = Field(True, validation_alias="BGZ_GATEWAY_VERIFY_TLS")
     ca_certs_file: Optional[str] = Field(None, validation_alias="BGZ_GATEWAY_CA_CERTS_FILE")
     log_level: str = Field("INFO", validation_alias="BGZ_GATEWAY_LOG_LEVEL")
+    log_sensitive_data: Optional[bool] = Field(None, validation_alias="BGZ_GATEWAY_LOG_SENSITIVE_DATA")
+    log_preview_chars: int = Field(2000, validation_alias="BGZ_GATEWAY_LOG_PREVIEW_CHARS")
     model_config = SettingsConfigDict(case_sensitive=False)
 
 
@@ -85,6 +88,8 @@ def _parse_csv_list(value: Any, *, default: List[str]) -> List[str]:
 
 _load_dotenv_once()
 settings = Settings()
+if settings.log_sensitive_data is None:
+    settings.log_sensitive_data = not settings.is_production
 MEDICAL_ROLE_CODES = _parse_csv_list(settings.medical_role_codes, default=[])
 REQUIRED_SCOPES = _parse_csv_list(settings.required_scopes, default=[])
 

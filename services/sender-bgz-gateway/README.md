@@ -40,10 +40,12 @@ Key configuration:
 Current PoC behavior:
 
 - `Task/{id}` read requires a valid token, matching `organization_ura`, and matching `authorization-base`
-- `Task?identifier=<system>|<value>` resolves exactly the geauthoriseerde workflow task when the requested identifier matches the authorized workflow task from the notification
+- `Task/{id}` only works for the actual sender workflow-task id; the notification itself carries `basedOn.identifier`, not a reusable sender `Task/{id}` reference
+- `Task?identifier=<system>|<value>` resolves exactly the geauthoriseerde workflow task when the requested identifier matches the `basedOn.identifier` from the notification
 - every sender data read/search must additionally match a path declared on the geauthoriseerde workflow task in `Task.input`
 - the gateway resolves the active workflow task from `Task.input[authorization-base]`; it does not use a repo-local `Task.identifier` shortcut for this
 - finding the workflow task by `authorization-base` is therefore only the first authorization step; it does not authorize arbitrary extra resources
+- workflow-task lookup does not require DEZI healthcare-professional claims; sender data reads do
 - the sender data surface is limited to the current PoC scope from the spec discussions: `Patient` plus the workflow-task-declared `Observation/$lastn` pulls for blood pressure and body weight
 - patient-identifying data reads/searches additionally require `employee_identifier` and `employee_roles`
 - BGZ-style introspection aliases such as `user_id` and `user_role` are accepted and normalized to the same internal checks

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +75,9 @@ class FakeHttpClient:
 
     async def put(self, url: str, *, json: Any = None, headers: Optional[Dict[str, str]] = None):
         return self._next("PUT", url, json=json, headers=headers or {})
+
+    async def request(self, method: str, url: str, **kwargs: Any):
+        return self._next(method, url, **kwargs)
 
     async def aclose(self) -> None:
         return None
@@ -670,3 +674,36 @@ def test_task_update_preserves_authorization_base(monkeypatch):
         and item.get("valueString") == "auth-123"
         for item in upstream_payload["input"]
     )
+
+
+def test_patient_search_logs_authorization_upstream_and_response_flow(monkeypatch, caplog):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    monkeypatch.setattr(appmod.settings, "log_sensitive_data", True, raising=False)
+    monkeypatch.setattr(appmod.settings, "log_preview_chars", 2000, raising=False)
+
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+
+    caplog.set_level(logging.INFO, logger="sender_bgz_gateway.app")
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Patient", headers=_auth_headers())
+
+    assert response.status_code == 200, response.text
+    assert 'Gateway request authorized' in caplog.text
+    assert 'token="test-token"' in caplog.text
+    assert 'auth_steps=["bearer_token_present"' in caplog.text
+    assert 'Upstream request' in caplog.text
+    assert 'upstream_name="nuts-introspection"' in caplog.text
+    assert 'upstream_url="http://upstream/fhir/Patient"' in caplog.text
+    assert 'Gateway response prepared' in caplog.text
+    assert 'response_source="Patient-search"' in caplog.text
