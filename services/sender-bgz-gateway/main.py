@@ -254,6 +254,7 @@ def _payload_log_preview(payload: Any) -> Any:
             "scope",
             "authorization-base",
             "authorization_base",
+            "workflow_authorization_base",
         ):
             if key in payload:
                 summary[key] = payload.get(key)
@@ -437,10 +438,14 @@ def _extract_token_context(data: dict[str, Any]) -> TokenContext:
                 data,
                 ("authorization-base",),
                 ("authorization_base",),
+                ("workflow_authorization_base",),
                 ("claims", "authorization-base"),
                 ("claims", "authorization_base"),
+                ("claims", "workflow_authorization_base"),
+                ("credentialSubject", "workflow_authorization_base"),
                 ("subject", "properties", "authorization-base"),
                 ("subject", "properties", "authorization_base"),
+                ("subject", "properties", "workflow_authorization_base"),
             )
             or ""
         ).strip(),
@@ -1049,13 +1054,14 @@ async def _authorize_request(
         logging.INFO,
         "Authorization started",
         token=_token_preview(token),
-        request_authorization_base=request_authorization_base or None,
+        request_authorization_base_present=bool(request_authorization_base),
         require_professional=require_professional,
         require_active_task=require_active_task,
         require_requested_task=require_requested_task,
     )
     token_ctx = await _introspect_token(token)
     auth_steps.append("token_introspection_active")
+    authorization_base_source = "token_introspection"
     if token_ctx.authorization_base and request_authorization_base and request_authorization_base != token_ctx.authorization_base:
         _raise_http(
             403,
@@ -1068,6 +1074,7 @@ async def _authorize_request(
         if not request_authorization_base:
             _raise_http(403, "missing_authorization_base", "Introspectie mist authorization-base claim.")
         token_ctx.authorization_base = request_authorization_base
+        authorization_base_source = "request_header_fallback"
         auth_steps.append("authorization_base_from_request_header")
     elif request_authorization_base:
         auth_steps.append("authorization_base_header_matches_token")
@@ -1114,6 +1121,7 @@ async def _authorize_request(
         logging.INFO,
         "Workflow task lookup evaluated",
         authorization_base=token_ctx.authorization_base,
+        authorization_base_source=authorization_base_source,
         matching_task_ids=[str(task.get("id") or "").strip() for task in tasks],
     )
     if not tasks:
@@ -1149,6 +1157,8 @@ async def _authorize_request(
         "Gateway request authorized",
         token=_token_preview(token),
         authorization_base=token_ctx.authorization_base,
+        authorization_base_source=authorization_base_source,
+        request_authorization_base_present=bool(request_authorization_base),
         task_id=str(task.get("id") or "").strip() or None,
         task_owner_ura=task_owner_ura or None,
         patient_bsn=patient_bsn,

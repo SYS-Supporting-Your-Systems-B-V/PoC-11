@@ -279,7 +279,7 @@ def test_task_read_authorized(monkeypatch):
     assert fake.calls[1]["params"] == [("_count", "200")]
 
 
-def test_task_read_accepts_authorization_base_header_fallback(monkeypatch):
+def test_task_read_accepts_authorization_base_header_fallback(monkeypatch, caplog):
     appmod = _import_app_module()
     _set_gateway_settings(monkeypatch, appmod)
     fake = FakeHttpClient()
@@ -291,12 +291,38 @@ def test_task_read_accepts_authorization_base_header_fallback(monkeypatch):
     fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
     fake.queue("GET", "http://upstream/fhir/Task/wf-1", DummyResponse(200, _workflow_task(appmod)))
 
+    caplog.set_level(logging.INFO, logger="sender_bgz_gateway.app")
+
     with TestClient(appmod.app) as client:
         monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
         response = client.get(
             "/fhir/Task/wf-1",
             headers={**_auth_headers(), "X-Authorization-Base": "auth-123"},
         )
+
+    assert response.status_code == 200, response.text
+    assert fake.calls[1]["params"] == [("_count", "200")]
+    assert 'authorization_base_source="request_header_fallback"' in caplog.text
+
+
+def test_task_read_accepts_workflow_authorization_base_from_introspection(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(
+            200,
+            _introspection_payload(**{"authorization-base": "", "workflow_authorization_base": "auth-123"}),
+        ),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod))))
+    fake.queue("GET", "http://upstream/fhir/Task/wf-1", DummyResponse(200, _workflow_task(appmod)))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Task/wf-1", headers=_auth_headers())
 
     assert response.status_code == 200, response.text
     assert fake.calls[1]["params"] == [("_count", "200")]
@@ -847,6 +873,7 @@ def test_patient_search_logs_authorization_upstream_and_response_flow(monkeypatc
     assert response.status_code == 200, response.text
     assert 'Gateway request authorized' in caplog.text
     assert 'token="test-token"' in caplog.text
+    assert 'authorization_base_source="token_introspection"' in caplog.text
     assert 'auth_steps=["bearer_token_present"' in caplog.text
     assert 'Upstream request' in caplog.text
     assert 'upstream_name="nuts-introspection"' in caplog.text

@@ -192,6 +192,13 @@
           "min": 0,
           "max": 10,
           "from": "user-identity"
+        },
+        {
+          "name": "Workflow context",
+          "rule": "pick",
+          "min": 0,
+          "max": 10,
+          "from": "workflow-context"
         }
       ],
       "input_descriptors": [
@@ -304,6 +311,33 @@
                 "id": "user_role",
                 "path": [
                   "$.credentialSubject.employee.role"
+                ],
+                "filter": {
+                  "type": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "workflow_context",
+          "group": ["workflow-context"],
+          "name": "Workflow context",
+          "constraints": {
+            "fields": [
+              {
+                "path": [
+                  "$.type"
+                ],
+                "filter": {
+                  "type": "string",
+                  "const": "WorkflowContextCredential"
+                }
+              },
+              {
+                "id": "workflow_authorization_base",
+                "path": [
+                  "$.credentialSubject.workflow_authorization_base"
                 ],
                 "filter": {
                   "type": "string"
