@@ -1141,13 +1141,18 @@ async def _authorize_request(
             task_owner_ura=task_owner_ura or None,
         )
     auth_steps.append("organization_matches_task_owner")
+    if require_active_task and not _task_is_active(task):
+        _raise_http(
+            403,
+            "workflow_task_not_active",
+            "Workflow task is niet actief.",
+            task_status=_task_status(task) or None,
+        )
+    if require_active_task:
+        auth_steps.append("workflow_task_active")
     if require_requested_task:
         _ensure_task_requested_for_fetch(task)
         auth_steps.append("workflow_task_requested")
-    if require_active_task and not _task_is_active(task):
-        _raise_http(403, "workflow_task_not_active", "Workflow task is niet actief voor deze update.")
-    if require_active_task:
-        auth_steps.append("workflow_task_active")
     patient_bsn = _extract_task_patient_bsn(task)
     if not patient_bsn:
         _raise_http(500, "workflow_task_missing_patient", "Workflow task bevat geen patiëntidentificatie.")
@@ -1305,7 +1310,7 @@ async def read_workflow_task(task_id: str, request: Request) -> Response:
     authz = await _authorize_request(
         request,
         require_professional=False,
-        require_active_task=False,
+        require_active_task=True,
         require_requested_task=True,
     )
     if task_id != authz.task_id:
@@ -1336,7 +1341,7 @@ async def search_workflow_task(request: Request) -> Response:
     authz = await _authorize_request(
         request,
         require_professional=False,
-        require_active_task=False,
+        require_active_task=True,
         require_requested_task=True,
     )
     if not _has_identifier(authz.task, system=identifier_system, value=identifier_value):
@@ -1413,7 +1418,12 @@ async def update_workflow_task(task_id: str, request: Request) -> Response:
 
 @app.get("/fhir/Observation/$lastn")
 async def observation_lastn(request: Request) -> Response:
-    authz = await _authorize_request(request, require_professional=True, require_active_task=False)
+    authz = await _authorize_request(
+        request,
+        require_professional=True,
+        require_active_task=True,
+        require_requested_task=True,
+    )
     _ensure_requested_path_authorized(
         authz.task,
         relative_path="Observation/$lastn",
@@ -1445,7 +1455,12 @@ async def search_resource(resource_type: str, request: Request) -> Response:
     if resource_type not in ALLOWED_DATA_RESOURCES:
         _raise_http(404, "resource_not_supported", "Deze FHIR resource wordt niet door de sender gateway ondersteund.")
 
-    authz = await _authorize_request(request, require_professional=True, require_active_task=False)
+    authz = await _authorize_request(
+        request,
+        require_professional=True,
+        require_active_task=True,
+        require_requested_task=True,
+    )
     _ensure_requested_path_authorized(
         authz.task,
         relative_path=resource_type,
@@ -1478,7 +1493,12 @@ async def read_resource(resource_type: str, resource_id: str, request: Request) 
     if resource_type not in ALLOWED_DATA_RESOURCES:
         _raise_http(404, "resource_not_supported", "Deze FHIR resource wordt niet door de sender gateway ondersteund.")
 
-    authz = await _authorize_request(request, require_professional=True, require_active_task=False)
+    authz = await _authorize_request(
+        request,
+        require_professional=True,
+        require_active_task=True,
+        require_requested_task=True,
+    )
     _ensure_requested_path_authorized(
         authz.task,
         relative_path=f"{resource_type}/{resource_id}",

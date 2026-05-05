@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -198,6 +199,14 @@ def _patient(patient_id: str = "patient-1") -> Dict[str, Any]:
     }
 
 
+def _observation(observation_id: str = "observation-1") -> Dict[str, Any]:
+    return {
+        "resourceType": "Observation",
+        "id": observation_id,
+        "subject": {"reference": "Patient/patient-1"},
+    }
+
+
 def _practitioner() -> Dict[str, Any]:
     return {"resourceType": "Practitioner", "id": "pr-1"}
 
@@ -374,7 +383,7 @@ def test_task_read_rejects_authorization_base_header_mismatch(monkeypatch):
     assert response.json()["detail"]["reason"] == "authorization_base_mismatch"
 
 
-def test_task_read_rejects_when_workflow_task_not_requested(monkeypatch):
+def test_task_read_rejects_when_workflow_task_not_active(monkeypatch):
     appmod = _import_app_module()
     _set_gateway_settings(monkeypatch, appmod)
     fake = FakeHttpClient()
@@ -391,8 +400,30 @@ def test_task_read_rejects_when_workflow_task_not_requested(monkeypatch):
 
     assert response.status_code == 403
     body = response.json()
-    assert body["detail"]["reason"] == "workflow_task_not_requested"
+    assert body["detail"]["reason"] == "workflow_task_not_active"
     assert body["detail"]["task_status"] == "completed"
+    assert len(fake.calls) == 2
+
+
+def test_task_read_rejects_when_workflow_task_active_but_not_requested(monkeypatch):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue("GET", "http://upstream/fhir/Task", DummyResponse(200, _bundle(_workflow_task(appmod, status="in-progress"))))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get("/fhir/Task/wf-1", headers=_auth_headers())
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["detail"]["reason"] == "workflow_task_not_requested"
+    assert body["detail"]["task_status"] == "in-progress"
     assert len(fake.calls) == 2
 
 
@@ -421,7 +452,7 @@ def test_task_search_authorized_by_identifier(monkeypatch):
     assert body["entry"][0]["resource"]["id"] == "wf-1"
 
 
-def test_task_search_rejects_when_workflow_task_not_requested(monkeypatch):
+def test_task_search_rejects_when_workflow_task_not_active(monkeypatch):
     appmod = _import_app_module()
     _set_gateway_settings(monkeypatch, appmod)
     fake = FakeHttpClient()
@@ -441,7 +472,7 @@ def test_task_search_rejects_when_workflow_task_not_requested(monkeypatch):
 
     assert response.status_code == 403
     body = response.json()
-    assert body["detail"]["reason"] == "workflow_task_not_requested"
+    assert body["detail"]["reason"] == "workflow_task_not_active"
     assert body["detail"]["task_status"] == "failed"
 
 
@@ -665,6 +696,52 @@ def test_data_read_forbidden_without_professional_claims(monkeypatch):
 
     assert response.status_code == 403
     assert response.json()["detail"]["reason"] == "missing_employee_identifier"
+
+
+@pytest.mark.parametrize(
+    ("path", "workflow_inputs", "final_url", "final_payload"),
+    [
+        ("/fhir/Patient", None, "http://upstream/fhir/Patient", _bundle(_patient())),
+        (
+            "/fhir/Observation/$lastn?code=http://loinc.org|85354-9",
+            None,
+            "http://upstream/fhir/Observation/$lastn",
+            _bundle(_observation()),
+        ),
+        (
+            "/fhir/Patient/patient-1",
+            ["Patient/patient-1"],
+            "http://upstream/fhir/Patient/patient-1",
+            _patient(),
+        ),
+    ],
+)
+def test_data_fetch_rejects_when_workflow_task_not_active(monkeypatch, path, workflow_inputs, final_url, final_payload):
+    appmod = _import_app_module()
+    _set_gateway_settings(monkeypatch, appmod)
+    fake = FakeHttpClient()
+    fake.queue(
+        "POST",
+        "http://nuts-node:8083/internal/auth/v2/accesstoken/introspect",
+        DummyResponse(200, _introspection_payload()),
+    )
+    fake.queue(
+        "GET",
+        "http://upstream/fhir/Task",
+        DummyResponse(200, _bundle(_workflow_task(appmod, status="completed", data_inputs=workflow_inputs))),
+    )
+    fake.queue("GET", "http://upstream/fhir/Patient", DummyResponse(200, _bundle(_patient())))
+    fake.queue("GET", final_url, DummyResponse(200, final_payload))
+
+    with TestClient(appmod.app) as client:
+        monkeypatch.setattr(appmod.app.state, "http_client", fake, raising=False)
+        response = client.get(path, headers=_auth_headers())
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["detail"]["reason"] == "workflow_task_not_active"
+    assert body["detail"]["task_status"] == "completed"
+    assert len(fake.calls) == 2
 
 
 def test_patient_search_forbidden_when_not_declared_on_workflow_task(monkeypatch):
