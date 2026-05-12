@@ -88,6 +88,8 @@ one-shot seed jobs can finish.
 
 ## Main Endpoints
 
+- BgZ demo UI: <http://10.10.10.198:8000/mcsd_bgz_verwijzing/>
+- BgZ demo UI, local equivalent: <http://localhost:8000/mcsd_bgz_verwijzing/>
 - ITI-91 API docs: <http://localhost:8509/docs>
 - ITI-90 API docs: <http://localhost:8000/docs>
 - Sender gateway: <http://localhost:8001/health>
@@ -215,7 +217,7 @@ docker compose -f start-stack/docker-compose.yaml run --rm --no-deps --entrypoin
 ```
 
 At the moment, `sender-bgz-gateway` has a test
-directorie in the repo, but it's image does not install `pytest` by default.
+directory in the repo, but its image does not install `pytest` by default.
 That is why there is a one-off test command to install `pytest` first.
 
 The remaining stack components do not currently ship a local pytest suite in
