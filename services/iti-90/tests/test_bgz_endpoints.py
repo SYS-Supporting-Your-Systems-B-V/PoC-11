@@ -134,6 +134,7 @@ def assert_task_matches_notification_template(
     sender_uzi_sys: str,
     receiver_ura: str,
     expected_workflow_task_identifier_value: Optional[str],
+    expected_workflow_task_id: Optional[str],
     expected_authorization_base: Optional[str] = None,
 ) -> None:
     """Asserties voor de gegenereerde BgZ Task op basis van notification-task.json.
@@ -149,7 +150,7 @@ def assert_task_matches_notification_template(
 
     assert set(task.keys()) == {"resourceType", "basedOn", "status", "intent", "code", "requester", "owner", "input"}
 
-    # --- basedOn: Workflow Task identifier ---
+    # --- basedOn: Workflow Task reference + identifier ---
     assert isinstance(task.get("basedOn"), list) and task["basedOn"], "basedOn ontbreekt"
     assert isinstance(task["basedOn"][0], dict), "basedOn[0] moet een dict zijn"
     based_on_identifier = (task["basedOn"][0].get("identifier") or {})
@@ -160,7 +161,10 @@ def assert_task_matches_notification_template(
         assert based_on_identifier_value == expected_workflow_task_identifier_value
     else:
         _assert_urn_uuid(based_on_identifier_value)
-    assert "reference" not in task["basedOn"][0]
+    based_on_reference = str(task["basedOn"][0].get("reference") or "").strip()
+    assert based_on_reference, "basedOn[0].reference ontbreekt"
+    if expected_workflow_task_id:
+        assert based_on_reference == f"Task/{expected_workflow_task_id}"
 
     # --- Sender (requester.onBehalfOf) ---
     assert task["requester"]["agent"]["identifier"]["system"] == template["requester"]["agent"]["identifier"]["system"]
@@ -708,6 +712,7 @@ def test_bgz_task_preview_location_routing_builds_task_from_template(appmod, cli
         sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
         receiver_ura="87654321",
         expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
+        expected_workflow_task_id=body["workflow_task_id"],
         expected_authorization_base=body["authorization_base"],
     )
 
@@ -760,6 +765,7 @@ def test_bgz_task_preview_healthcareservice_routing_builds_task_from_template(ap
         sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
         receiver_ura="87654321",
         expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
+        expected_workflow_task_id=body["workflow_task_id"],
         expected_authorization_base=body["authorization_base"],
     )
 
@@ -815,6 +821,7 @@ def test_bgz_task_preview_generates_workflow_task_id_when_missing(appmod, client
         sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
         receiver_ura="87654321",
         expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
+        expected_workflow_task_id=body["workflow_task_id"],
         expected_authorization_base=body["authorization_base"],
     )
 
@@ -994,6 +1001,7 @@ def test_bgz_notify_posts_task_and_returns_result(appmod, client, monkeypatch):
         sender_uzi_sys="urn:oid:2.16.528.1.1007.3.2.1234567",
         receiver_ura="87654321",
         expected_workflow_task_identifier_value=body["workflow_task_identifier_value"],
+        expected_workflow_task_id=body["workflow_task_id"],
         expected_authorization_base=body["authorization_base"],
     )
 
