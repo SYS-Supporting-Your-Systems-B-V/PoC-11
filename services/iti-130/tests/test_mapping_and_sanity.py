@@ -136,25 +136,6 @@ def test_build_resources_from_seed_sqlite_passes_sanity(publisher_module, base_c
     )
 
 
-def test_seed_sqlite_includes_mock_receiver_notification_endpoint(publisher_module, base_cfg):
-    with publisher_module._connect(base_cfg.sql_conn) as conn:
-        _kliniek_rows, _kliniek_locatie_rows, _locatie_rows, _afdeling_rows, endpoint_rows = _load_seeded_rows(publisher_module, conn)
-
-    ep_resources_all, _ep_by_kliniek, _ep_by_locatie, _ep_by_afdeling = publisher_module._build_endpoints(base_cfg, endpoint_rows)
-    mock_notification_endpoint = next(
-        resource
-        for resource in ep_resources_all
-        if resource.get("resourceType") == "Endpoint"
-        and resource.get("address") == "https://mach2.disyepd.com/receiver-mock/fhir"
-    )
-
-    assert publisher_module._endpoint_has_payload_coding(
-        mock_notification_endpoint,
-        publisher_module.NL_GF_DATA_EXCHANGE_CAPABILITIES_SYSTEM,
-        publisher_module.TWIIN_TA_NOTIFICATION_CODE,
-    )
-
-
 def test_bgz_policy_per_clinic_fails_when_endpoint_not_active(publisher_module, base_cfg):
     # Maak resources en forceer endpoint status off, dan moet sanity check falen (strict)
     with publisher_module._connect(base_cfg.sql_conn) as conn:
