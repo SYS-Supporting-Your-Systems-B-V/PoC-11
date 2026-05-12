@@ -236,7 +236,6 @@ clinic `1` and therefore published with logical ids `Endpoint/ep-900` through
 | --- | --- | --- | --- | --- | --- |
 | `900` | `FHIR API` | `https://mach2.disyepd.com/notifiedpull/fhir` | `hl7-fhir-rest / HL7 FHIR REST` | `BGZ Server` | BGZ server endpoint |
 | `901` | `Nuts OAuth2` | `https://mach2.disyepd.com/nuts-oauth2/oauth2/00700700` | `direct-project / Direct Project` | `Nuts-OAuth` | Authentication server endpoint |
-| `902` | `Mock Notification Receiver` | `https://mach2.disyepd.com/receiver-mock/fhir` | `hl7-fhir-rest / HL7 FHIR REST` | `Twiin TA Notification endpoint` | Notification receiver used in local sender-flow testing |
 | `903` | `Administration Directory` | `https://mach2.disyepd.com/fhir` | `hl7-fhir-rest / HL7 FHIR REST` | `Care Services Directory for Update Client` | ITI-91 discovery/update capability |
 
 Unlike the older version of this README, the current seed does not leave the

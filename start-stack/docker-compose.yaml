@@ -88,27 +88,6 @@ services:
       - mcsd_update_client_net
     restart: unless-stopped
 
-  mock-notification-receiver:
-    build:
-      context: ../services/mock-notification-receiver
-      dockerfile: Dockerfile
-    ports:
-      - "8002:8002"
-    volumes:
-      - ../services/mock-notification-receiver:/app
-      - ../secrets:/secrets:ro
-    environment:
-      MOCK_RECEIVER_PUBLIC_ROOT: ${MOCK_RECEIVER_PUBLIC_ROOT:-https://mach2.disyepd.com/receiver-mock}
-      MOCK_RECEIVER_PUBLIC_BASE: ${MOCK_RECEIVER_PUBLIC_BASE:-https://mach2.disyepd.com/receiver-mock/fhir}
-      MOCK_RECEIVER_LOCAL_ADRESBOOK_FHIR_BASE: ${MOCK_RECEIVER_LOCAL_ADRESBOOK_FHIR_BASE:-http://hapi-update-client:8081/fhir}
-      MOCK_RECEIVER_DEZI_CALLBACK_PATH: ${MOCK_RECEIVER_DEZI_CALLBACK_PATH:-auth/dezi/callback}
-      MOCK_RECEIVER_DEZI_CERTIFICATE_FILE: ${MOCK_RECEIVER_DEZI_CERTIFICATE_FILE:-/secrets/mock-notification-receiver/dezi/certificaat_SYS_DEZI.crt}
-      MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE: ${MOCK_RECEIVER_DEZI_PRIVATE_KEY_FILE:-/secrets/mock-notification-receiver/dezi/sleutel_SYS_DEZI.key}
-      MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE: ${MOCK_RECEIVER_REQUIRED_INCOMING_SCOPE:-eOverdracht-receiver}
-      MOCK_RECEIVER_SENDER_DATA_SCOPE: ${MOCK_RECEIVER_SENDER_DATA_SCOPE:-eOverdracht-sender}
-    networks:
-      - mcsd_update_client_net
-    restart: unless-stopped
 
   nuts-node:
     build:
@@ -295,7 +274,6 @@ services:
       - hapi-directory
       - nuts-node
       - sender-bgz-gateway
-      - mock-notification-receiver
     networks:
       mcsd_update_client_net:
         aliases:

@@ -20,10 +20,6 @@ secrets/
       test-uzi-client.key
       test-uzi-client.pem
       test-uzi-client-chain.pem
-  mock-notification-receiver/
-    dezi/
-      certificaat_SYS_DEZI.crt
-      sleutel_SYS_DEZI.key
   nuts-node/
     tls/
       mach2.disyepd.com.pem
@@ -55,7 +51,6 @@ signed by that CA for local PoC use.
 ## Docker Mounts
 
 - `iti-90-address-book-proxy` mounts `../secrets:/secrets:ro`
-- `mock-notification-receiver` mounts `../secrets:/secrets:ro`
 - `nuts-node` mounts `../secrets/nuts-node/tls:/opt/nuts/certs:ro`
 - `iti-91-mcsd-update-client` already mounts `../secrets:/src/secrets`
 
@@ -67,10 +62,6 @@ signed by that CA for local PoC use.
   `mach2.disyepd.com.pem`, `mach2.disyepd.com.key`, and
   `mach2.disyepd.com-chain.pem`.
 - If those Nuts TLS files are missing, `nuts-node` cannot start.
-- `mock-notification-receiver` can start without its DEZI certificate and key,
-  but the `/dezi` login flow and UI `pull` action will fail until
-  `secrets/mock-notification-receiver/dezi/certificaat_SYS_DEZI.crt` and
-  `secrets/mock-notification-receiver/dezi/sleutel_SYS_DEZI.key` are present.
 - When using the real `start-stack/caddy/Caddyfile` instead of
   `Caddyfile.local`, provide `secrets/cloudflare_api_token` before startup.
 

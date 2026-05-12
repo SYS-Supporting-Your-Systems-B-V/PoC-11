@@ -13,7 +13,6 @@ It includes:
 - `services/iti-91`: update client plus directory-registry extensions
 - `services/iti-90`: address-book proxy and notification builder
 - `services/sender-bgz-gateway`: protected sender-side follow-up API
-- `services/mock-notification-receiver`: receiver-side test harness
 - `start-stack`: the canonical Docker Compose setup
 
 > [!CAUTION]
@@ -35,12 +34,6 @@ Before first start, verify these setup items:
   `secrets/nuts-node/tls/`. With the default domain that means:
   `mach2.disyepd.com.pem`, `mach2.disyepd.com.key`, and
   `mach2.disyepd.com-chain.pem`.
-- `secrets/mock-notification-receiver/dezi/`: if you want the receiver-side
-  DEZI login and sender-data pull flow to work, place
-  `certificaat_SYS_DEZI.crt` and `sleutel_SYS_DEZI.key` there.
-- `services/mock-notification-receiver/.env`: verify
-  `MOCK_RECEIVER_DEZI_CLIENT_ID`, `MOCK_RECEIVER_PUBLIC_ROOT`, and
-  `MOCK_RECEIVER_DEZI_CALLBACK_PATH` match the registered DEZI client.
 - when `COMPOSE_PROFILES=caddy` and `CADDYFILE_NAME=Caddyfile`, provide
   `secrets/cloudflare_api_token`; for local-only HTTPS use `Caddyfile.local`
   instead.
@@ -50,7 +43,6 @@ Review these files before starting the stack:
 - `start-stack/.env`
 - `start-stack/iti-91.conf`
 - `services/iti-90/.env.Docker`
-- `services/mock-notification-receiver/.env`
 - `SECRETS.md`
 
 Start the stack:
@@ -89,7 +81,6 @@ Expected by default:
 - ITI-91 service docs: [`services/iti-91/README.md`](services/iti-91/README.md)
 - ITI-91 architecture notes: [`services/iti-91/docs/README.md`](services/iti-91/docs/README.md)
 - ITI-130 service docs: [`services/iti-130/README.md`](services/iti-130/README.md)
-- Mock receiver docs: [`services/mock-notification-receiver/README.md`](services/mock-notification-receiver/README.md)
 - Sender gateway docs: [`services/sender-bgz-gateway/README.md`](services/sender-bgz-gateway/README.md)
 
 ## Operational Notes
