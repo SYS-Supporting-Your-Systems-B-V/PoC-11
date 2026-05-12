@@ -272,3 +272,9 @@ API behavior.
 - Architecture notes: [`docs/README.md`](docs/README.md)
 - Full stack: [`../../start-stack/README.md`](../../start-stack/README.md)
 - Repository overview: [`../../README.md`](../../README.md)
+
+## Licensing
+
+- Code: EUPL-1.2. See [`LICENSE.md`](LICENSE.md).
+- Documentation: CC BY-SA 4.0. See [`../../LICENSES/CC-BY-SA-4.0.txt`](../../LICENSES/CC-BY-SA-4.0.txt).
+- Third-party dependencies: see [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).

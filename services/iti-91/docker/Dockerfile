@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 # syntax directive is used to enable Docker BuildKit
 
-ARG PYTHON_VERSION=3.11
+ARG PYTHON_IMAGE=python:3.11-slim@sha256:233de06753d30d120b1a3ce359d8d3be8bda78524cd8f520c99883bfe33964cf
 
-FROM python:${PYTHON_VERSION}-slim AS base
+FROM ${PYTHON_IMAGE} AS base
 
 ARG PROJECT_DIR="/src"
 ARG APP_USER="app"

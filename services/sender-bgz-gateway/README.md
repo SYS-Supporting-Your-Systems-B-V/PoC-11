@@ -165,3 +165,9 @@ pytest -vv tests
 ## Related Docs
 
 - Full stack: [`../../start-stack/README.md`](../../start-stack/README.md)
+
+## Licensing
+
+- Code: MIT. See [`LICENSE.md`](LICENSE.md).
+- Documentation: CC BY-SA 4.0. See [`../../LICENSES/CC-BY-SA-4.0.txt`](../../LICENSES/CC-BY-SA-4.0.txt).
+- Third-party dependencies: see [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).

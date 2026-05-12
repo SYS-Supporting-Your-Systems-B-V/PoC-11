@@ -1,4 +1,4 @@
-FROM nutsfoundation/nuts-node:project-gf
+FROM nutsfoundation/nuts-node:project-gf@sha256:362b321fe9b8b72c11872a0108bd41a3d05dd4b7b390090247740482a6b0a1e0
 
 USER root
 

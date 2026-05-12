@@ -101,3 +101,5 @@ Expected by default:
 - `services/iti-91`: EUPL-1.2 in that service folder
 - Documentation: CC BY-SA 4.0
 - Third-party dependencies: see service-level `THIRD_PARTY_LICENSES.md` files
+- Distribution notices: see `DISTRIBUTION_NOTICES.md`
+- Runtime container image notices: see `start-stack/THIRD_PARTY_CONTAINER_IMAGES.md`

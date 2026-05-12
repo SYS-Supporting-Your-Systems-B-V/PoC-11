@@ -1,7 +1,7 @@
 # docker build -t iti130-publisher /home/yob/ITI-130
 # docker run --name ITI-130-publisher --rm --network mcsd_update_client_net iti130-publisher
 
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:233de06753d30d120b1a3ce359d8d3be8bda78524cd8f520c99883bfe33964cf
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

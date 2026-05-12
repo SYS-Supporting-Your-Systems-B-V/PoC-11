@@ -115,7 +115,7 @@ services:
 
 ## HAPI FHIR SERVERS
   hapi-update-client:
-    image: "hapiproject/hapi:latest"
+    image: "hapiproject/hapi@sha256:7611e4d6601f35dd8c223ed2ed47a2807be06976f71b2e5990e6541bbc90c16f"
     ports:
       - "8081:8081"
     environment:
@@ -133,7 +133,7 @@ services:
   # Can be tested with on the host machine with:
   # curl -k --resolve mach2.disyepd.com:443:127.0.0.1 https://mach2.disyepd.com/notifiedpull/fhir
   hapi-notifiedpull-stu3:
-    image: "hapiproject/hapi:latest"
+    image: "hapiproject/hapi@sha256:7611e4d6601f35dd8c223ed2ed47a2807be06976f71b2e5990e6541bbc90c16f"
     ports:
       - "8082:8082"
     environment:
@@ -151,7 +151,7 @@ services:
   # Can be tested with on the host machine with:
   # curl -k --resolve mach2.disyepd.com:443:127.0.0.1 https://mach2.disyepd.com/fhir
   hapi-directory:
-    image: "hapiproject/hapi:latest"
+    image: "hapiproject/hapi@sha256:7611e4d6601f35dd8c223ed2ed47a2807be06976f71b2e5990e6541bbc90c16f"
     ports:
       - "8080:8080"
     environment:
@@ -171,7 +171,7 @@ services:
 
 ## HEALTHCHECK SERVICES FOR HAPI SERVERS
   hapi-update-client-health:
-    image: curlimages/curl
+    image: curlimages/curl@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17
     healthcheck:
       test:
         [
@@ -190,7 +190,7 @@ services:
     command: sleep infinity
 
   hapi-notifiedpull-stu3-health:
-    image: curlimages/curl
+    image: curlimages/curl@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17
     healthcheck:
       test:
         [
@@ -209,7 +209,7 @@ services:
     command: sleep infinity
 
   hapi-directory-health:
-    image: curlimages/curl
+    image: curlimages/curl@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17
     healthcheck:
       test:
         [
@@ -230,7 +230,7 @@ services:
 ## SUPPORTING SERVICES
   # fills the notifiedpull-stu3 server with seed data placed in notifiedpull-stu3.bundle.json
   notifiedpull-seed:
-    image: curlimages/curl
+    image: curlimages/curl@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17
     depends_on:
       hapi-notifiedpull-stu3-health:
         condition: service_healthy
@@ -281,7 +281,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:latest
+    image: redis:7.2.4@sha256:5a93f6b2e391b78e8bd3f9e7e1e1e06aeb5295043b4703fb88392835cec924a0
     restart: "no"
     command: ["redis-server", "--port", "16379"]
     ports:
@@ -292,7 +292,7 @@ services:
           - external-cache
 
   postgres:
-    image: postgres:15
+    image: postgres:15@sha256:98fe06b500b5eb29e45bf8c073eb0ca399790ce17b1d586448edc4203627d342
     healthcheck:
       test: ["CMD-SHELL", "pg_isready --user postgres"]
       start_period: 30s

@@ -220,3 +220,10 @@ That is why there is a one-off test command to install `pytest` first.
 
 The remaining stack components do not currently ship a local pytest suite in
 this repository.
+
+## Licensing
+
+- Repository code and service-specific license status: see [`../LICENSE_COMPLIANCE_NOTE.md`](../LICENSE_COMPLIANCE_NOTE.md).
+- Distribution notices: see [`../DISTRIBUTION_NOTICES.md`](../DISTRIBUTION_NOTICES.md).
+- Runtime container image notices: see [`THIRD_PARTY_CONTAINER_IMAGES.md`](THIRD_PARTY_CONTAINER_IMAGES.md).
+- Documentation: CC BY-SA 4.0. See [`../LICENSES/CC-BY-SA-4.0.txt`](../LICENSES/CC-BY-SA-4.0.txt).
