@@ -52,19 +52,19 @@ Out of scope:
 
 The default local flow is:
 
-1. `iti-130-publisher` seeds demo mCSD resources into `hapi-directory`.
+1. `iti-130-publisher` seeds demo mCSD resources into `hapi-directory`. The URL for fetching the resources in this admin directory is registered in the LRZa.
 2. `iti-91-mcsd-update-client` discovers source directories from config,
-   provider URLs, or its registry DB, rewrites source-local ids/references, and
-   writes aggregated resources into `hapi-update-client`.
-3. `iti-90-address-book-proxy` reads the aggregated directory, exposes
-   operator-friendly search/discovery endpoints, resolves receiver capabilities,
+   LRZa's, or its registry DB, rewrites source-local ids/references, and
+   writes aggregated resources into a local (FHIR store) mCSD adresbook `hapi-update-client`.
+3. `iti-90-address-book-proxy` reads the local mCSD adresbook, exposes
+   API search/discovery endpoints, resolves receiver capabilities,
    and builds Twiin TA Notified Pull notification `Task` resources for the BgZ
    flow.
 4. `nuts-node` is used by the sender flow for GF/Nuts token-related
-   authentication integration, including receiver token requests and gateway
+   authentication integration, including token requests and gateway
    token introspection.
 5. `sender-bgz-gateway` protects follow-up FHIR reads and task updates against
-   the internal `hapi-notifiedpull-stu3` sender store by checking
+   the internal `hapi-notifiedpull-stu3` sender STU3 FHIR store by checking
    `authorization-base`, organization authorization, DEZI-claims and role codes, and
    the FHIR paths allowed by the workflow task.
 6. Optional `caddy` exposes local HTTPS routes for the configured public domain.
@@ -99,8 +99,8 @@ Before first start, verify these setup items:
   `cp start-stack/.env.example start-stack/.env`
 - `start-stack/.env`: `PUBLIC_DOMAIN` must match the Nuts TLS filenames under
   `secrets/nuts-node/tls/`. With the default domain that means:
-  `mach2.disyepd.com.pem`, `mach2.disyepd.com.key`, and
-  `mach2.disyepd.com-chain.pem`.
+  `your.domain.com.pem`, `your.domain.com.key`, and
+  `your.domain.com-chain.pem`.
 - when `COMPOSE_PROFILES=caddy` and `CADDYFILE_NAME=Caddyfile`, provide
   `secrets/cloudflare_api_token`; for local-only HTTPS use `Caddyfile.local`
   instead.

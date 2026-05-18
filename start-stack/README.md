@@ -49,11 +49,11 @@ runtime config expects these filenames:
 - `${PUBLIC_DOMAIN}.key`
 - `${PUBLIC_DOMAIN}-chain.pem`
 
-With the default `PUBLIC_DOMAIN=mach2.disyepd.com`, the required files are:
+With the default `PUBLIC_DOMAIN=your.domain.com`, the required files are:
 
-- `../secrets/nuts-node/tls/mach2.disyepd.com.pem`
-- `../secrets/nuts-node/tls/mach2.disyepd.com.key`
-- `../secrets/nuts-node/tls/mach2.disyepd.com-chain.pem`
+- `../secrets/nuts-node/tls/your.domain.com.pem`
+- `../secrets/nuts-node/tls/your.domain.com.key`
+- `../secrets/nuts-node/tls/your.domain.com-chain.pem`
 
 If these files are missing, `nuts-node` cannot start. If you change
 `PUBLIC_DOMAIN`, you must also provide matching filenames in that folder.

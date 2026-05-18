@@ -57,8 +57,8 @@ If you need to re-issue the fake certs instead of reusing the files in `secrets/
 
 ```PowerShell
 docker run --rm `
-  -v "C:\Users\Yob\Documents\Coding\PoC 9\PoC-9-SYS\secrets\nuts-node\tls:/work" `
-  -v "C:\Users\Yob\Documents\Coding\PoC 9\PoC-9-SYS\services\nuts-node\certs:/scripts:ro" `
+  -v "..\secrets\nuts-node\tls:/work" `
+  -v "..\services\nuts-node\certs:/scripts:ro" `
   alpine:3.19 `
   sh /scripts/generate-certs.sh
 ```

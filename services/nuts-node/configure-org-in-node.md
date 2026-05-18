@@ -1,6 +1,8 @@
 
 ## create a DID in the nuts-node
 subject = URA of the organization, in this example we used 00700700
+mach2.disyepd.com = domain of the organization, change this url if a different one is needed
+
 ``` bash
 curl --location 'localhost:8083/internal/vdr/v2/subject' \
 --header 'Content-Type: application/json' \
@@ -8,6 +10,7 @@ curl --location 'localhost:8083/internal/vdr/v2/subject' \
 ```
 
 ### Response:
+``` bash
 {
    "documents":[
       {
@@ -45,6 +48,7 @@ curl --location 'localhost:8083/internal/vdr/v2/subject' \
    ],
    "subject":"00700700"
 }
+```
 
 ## check available DIDs
 curl --location 'http://localhost:8083/internal/vdr/v2/subject'

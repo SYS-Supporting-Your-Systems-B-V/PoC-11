@@ -22,9 +22,9 @@ secrets/
       test-uzi-client-chain.pem
   nuts-node/
     tls/
-      mach2.disyepd.com.pem
-      mach2.disyepd.com.key
-      mach2.disyepd.com-chain.pem
+      your.domain.com.pem
+      your.domain.com.key
+      your.domain.com-chain.pem
 ```
 
 ## Why This Layout
@@ -58,9 +58,9 @@ signed by that CA for local PoC use.
 
 - `nuts-node` expects its TLS files under `secrets/nuts-node/tls/` and the
   filenames must match `PUBLIC_DOMAIN`. With the default
-  `PUBLIC_DOMAIN=mach2.disyepd.com`, that means:
-  `mach2.disyepd.com.pem`, `mach2.disyepd.com.key`, and
-  `mach2.disyepd.com-chain.pem`.
+  `PUBLIC_DOMAIN=your.domain.com`, that means:
+  `your.domain.com.pem`, `your.domain.com.key`, and
+  `your.domain.com-chain.pem`.
 - If those Nuts TLS files are missing, `nuts-node` cannot start.
 - When using the real `start-stack/caddy/Caddyfile` instead of
   `Caddyfile.local`, provide `secrets/cloudflare_api_token` before startup.

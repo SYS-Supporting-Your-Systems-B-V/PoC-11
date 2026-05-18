@@ -95,7 +95,7 @@ services:
       dockerfile: Dockerfile
     environment:
       NUTS_CONFIGFILE: /opt/nuts/nuts.yaml
-      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-mach2.disyepd.com}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-your.domain.com}
     ports:
       - "8083:8083"
       - "8084:8084"
@@ -131,13 +131,13 @@ services:
     mem_limit: 1g
 
   # Can be tested with on the host machine with:
-  # curl -k --resolve mach2.disyepd.com:443:127.0.0.1 https://mach2.disyepd.com/notifiedpull/fhir
+  # curl -k --resolve ${PUBLIC_DOMAIN}:443:127.0.0.1 https://${PUBLIC_DOMAIN}/notifiedpull/fhir
   hapi-notifiedpull-stu3:
     image: "hapiproject/hapi@sha256:7611e4d6601f35dd8c223ed2ed47a2807be06976f71b2e5990e6541bbc90c16f"
     ports:
       - "8082:8082"
     environment:
-      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-mach2.disyepd.com}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-your.domain.com}
     configs:
       - source: hapi_notifiedpull_stu3_config
         target: /app/config/application.yaml
@@ -149,7 +149,7 @@ services:
     mem_limit: 1g
 
   # Can be tested with on the host machine with:
-  # curl -k --resolve mach2.disyepd.com:443:127.0.0.1 https://mach2.disyepd.com/fhir
+  # curl -k --resolve ${PUBLIC_DOMAIN}:443:127.0.0.1 https://${PUBLIC_DOMAIN}/fhir
   hapi-directory:
     image: "hapiproject/hapi@sha256:7611e4d6601f35dd8c223ed2ed47a2807be06976f71b2e5990e6541bbc90c16f"
     ports:
@@ -157,7 +157,7 @@ services:
     environment:
       # The directory server loads stricter validation/profile config than the other HAPI nodes.
       JAVA_TOOL_OPTIONS: "-XX:InitialRAMPercentage=25.0 -XX:MaxRAMPercentage=70.0"
-      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-mach2.disyepd.com}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-your.domain.com}
     configs:
       - source: hapi_directory_config
         target: /app/config/application.yaml
@@ -255,7 +255,7 @@ services:
     profiles:
       - caddy
     environment:
-      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-mach2.disyepd.com}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-your.domain.com}
     ports:
       - "443:443"
     volumes:
@@ -277,7 +277,7 @@ services:
     networks:
       mcsd_update_client_net:
         aliases:
-          - ${PUBLIC_DOMAIN:-mach2.disyepd.com}
+          - ${PUBLIC_DOMAIN:-your.domain.com}
     restart: unless-stopped
 
   redis:

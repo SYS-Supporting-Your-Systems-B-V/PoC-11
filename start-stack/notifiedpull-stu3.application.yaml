@@ -19,7 +19,7 @@ hapi:
       home:
         id: home
         name: hapi STU3 Tester (8082 for notified pull)
-        server_address: 'https://${PUBLIC_DOMAIN:mach2.disyepd.com}/notifiedpull/fhir'
+        server_address: 'https://${PUBLIC_DOMAIN:your.domain.com}/notifiedpull/fhir'
         refuse_to_fetch_third_party_urls: false
         fhir_version: DSTU3
     validation:
